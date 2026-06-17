@@ -14,13 +14,17 @@ def detect_device() -> str:
     else:
         return 'cpu'
 
-def create_dataset():
+def create_dataset(max_string_length: int):
     ds = load_dataset("Helsinki-NLP/opus_books", "en-it")['train']
 
-    split_index = int(0.9 * ds.num_rows)
+    it_full, en_full = [], []
+    for x in ds['translation']:
+        if len(x['it']) > max_string_length:
+            continue
+        it_full.append(x['it'])
+        en_full.append(x['en'])
 
-    it_full = [x['it'] for x in ds['translation']]
-    en_full = [x['en'] for x in ds['translation']]
+    split_index = int(0.9 * len(it_full))
 
     it_train = it_full[:split_index]
     en_train = en_full[:split_index]
@@ -62,10 +66,16 @@ def main() -> int:
     device = detect_device()
     print(f'device: {device}')
 
-    ds, it_full, en_full, it_train, en_train, it_eval, en_eval = create_dataset()
+    # Cap max string length to 600 characters to simplify bucketing
+    # Longer ones are just outliers and would not be enough to fill a batch
+    #
+    # An alternative approach to try is to truncate instead
+    ds, it_full, en_full, it_train, en_train, it_eval, en_eval = create_dataset(600)
     print(f'total dataset length: {ds.num_rows}')
-    print(f'train length: {len(it_train)}')
-    print(f'eval length: {len(en_eval)}')
+    print(f'it_train length: {len(it_train)}')
+    print(f'en_train length: {len(en_train)}')
+    print(f'it_eval length: {len(it_eval)}')
+    print(f'en_eval length: {len(en_eval)}')
 
     vocab = sorted(list(set("".join(it_full + en_full))))
     vocab_size = len(vocab)
