@@ -29,6 +29,20 @@ def create_dataset():
 
     return ds, it_full, en_full, it_train, en_train, it_eval, en_eval
 
+class FeedForward(nn.Module):
+
+    def __init__(self, d_model: int, d_hid: int):
+        super().__init__()
+        self.lin1 = nn.Linear(d_model, d_hid)
+        self.relu = nn.ReLU()
+        self.lin2 = nn.Linear(d_hid, d_model)
+
+    def forward(self, input):
+        out = self.lin1(input)
+        out = self.relu(out)
+        out = self.lin2(out)
+        return out
+
 class AttentionReplica(nn.Module):
 
     def __init__(self, hy: Hyperparameters, vocab_size: int):
