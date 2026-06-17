@@ -4,7 +4,10 @@ import torch.nn as nn
 from torch.nn import functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
-from dataclasses import dataclass
+
+# Hyperparameters
+d_model=512
+# ---------------
 
 def detect_device() -> str:
     if torch.cuda.is_available():
@@ -49,46 +52,38 @@ class FeedForward(nn.Module):
 
 class AttentionReplica(nn.Module):
 
-    def __init__(self, hy: Hyperparameters, vocab_size: int):
+    def __init__(self, vocab_size: int):
         super().__init__()
-        self.emb_table = nn.Embedding(vocab_size, hy.d_model)
+        self.emb_table = nn.Embedding(vocab_size, d_model)
 
     def forward(self, source, tr_seq):
         return None
-    
-@dataclass
-class Hyperparameters:
-    d_model: int
 
-def main() -> int:
-    load_dotenv()
 
-    device = detect_device()
-    print(f'device: {device}')
+# Guard and main body of the script
+if __name__ != "__main__":
+    sys.exit(-1)
 
-    # Cap max string length to 600 characters to simplify bucketing
-    # Longer ones are just outliers and would not be enough to fill a batch
-    #
-    # An alternative approach to try is to truncate instead
-    ds, it_full, en_full, it_train, en_train, it_eval, en_eval = create_dataset(600)
-    print(f'total dataset length: {ds.num_rows}')
-    print(f'it_train length: {len(it_train)}')
-    print(f'en_train length: {len(en_train)}')
-    print(f'it_eval length: {len(it_eval)}')
-    print(f'en_eval length: {len(en_eval)}')
+load_dotenv()
 
-    vocab = sorted(list(set("".join(it_full + en_full))))
-    vocab_size = len(vocab)
-    print(f'vocab size: {vocab_size}')
+device = detect_device()
+print(f'device: {device}')
 
-    # Hyperparameters
-    hy = Hyperparameters(
-        d_model=512
-    )
+# Cap max string length to 600 characters to simplify bucketing
+# Longer ones are just outliers and would not be enough to fill a batch
+#
+# An alternative approach to try is to truncate instead
+ds, it_full, en_full, it_train, en_train, it_eval, en_eval = create_dataset(600)
+print(f'total dataset length: {ds.num_rows}')
+print(f'it_train length: {len(it_train)}')
+print(f'en_train length: {len(en_train)}')
+print(f'it_eval length: {len(it_eval)}')
+print(f'en_eval length: {len(en_eval)}')
 
-    m = AttentionReplica(hy, vocab_size)
+vocab = sorted(list(set("".join(it_full + en_full))))
+vocab_size = len(vocab)
+print(f'vocab size: {vocab_size}')
 
-    return 0
+m = AttentionReplica(vocab_size)
 
-if __name__ == "__main__":
-    sys.exit(main())
+sys.exit(0)
