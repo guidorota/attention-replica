@@ -51,3 +51,11 @@ One option is to just order all sentences, batch them, and then shuffle the batc
 ```
 
 Another option called pool bucketing consists of creating big batches (50x times bigger than a normal batch), and then sort by length within each individual batch, instead of doing that globally.
+
+## Padding
+
+* Need to pad both source and translation
+* Encoder attention needs to ignore all padding
+* Decoder self attention needs to pad both future tokens, and padding
+* Cross attention in the decoder needs to ignore input padding (as that's where K,V come from)
+* Padding needs to be also considered when calculating the loss (`ignore_index` in `F.cross_entropy()`)
