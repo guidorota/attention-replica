@@ -136,13 +136,20 @@ def generate_batch(dataset):
     
     idx_start = random.randint(0, len(it_data) - batch_size)
     idxs = sorted_idx[idx_start:idx_start+batch_size]
-    it_data_batch = [torch.tensor(it_data[x]) for x in idxs]
-    en_data_batch = [torch.tensor(en_data[x]) for x in idxs]
+    it_x = pad([torch.tensor(it_data[x]) for x in idxs])
+    en_x = pad([torch.tensor(en_data[x]) for x in idxs])
+    en_y = en_x.detach().clone()
+
+    bos_col = torch.full((batch_size, 1), bos_token_idx, dtype=en_x.dtype)
+    en_x = torch.cat([bos_col, en_x], dim=1)
+
+    eos_col = torch.full((batch_size, 1), eos_token_idx, dtype=en_x.dtype)
+    en_y = torch.cat([en_y, eos_col], dim=1)
     
-    return pad(it_data_batch), pad(en_data_batch)
+    return it_x, en_x, en_y
 
 m = AttentionReplica(vocab_size)
 
-it_batch, en_batch = generate_batch('train')
+it_x, en_x, en_y = generate_batch('train')
 
 sys.exit(0)
