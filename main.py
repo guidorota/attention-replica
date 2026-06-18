@@ -18,11 +18,6 @@ def detect_device() -> str:
     else:
         return 'cpu'
 
-def create_dataset(max_string_length: int):
-
-
-    return ds, it_full, en_full, it_train, en_train, it_eval, en_eval
-
 class FeedForward(nn.Module):
 
     def __init__(self, d_model: int, d_hid: int):

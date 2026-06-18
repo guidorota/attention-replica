@@ -23,7 +23,7 @@
     * LR needs to be changed proportionally to batch size (Adam / AdamW is LR scales batch_size**0.5)
 * Split model and related hyperparams in a separate file
 * Implement wordpiece tokens (1609.08144)
-* Need to try `torch.compile`
+* Need to try `torch.compile`, however note this will only have benefits when moving to GPU training since support for mps is still in progress: [https://github.com/pytorch/pytorch/issues/150121](https://github.com/pytorch/pytorch/issues/150121)
 
 ## Example of input for the network
 
