@@ -16,13 +16,16 @@ d_model = 512
 d_hid = 4 * d_model
 max_len = 600
 batch_size = 30
-n_head = 4
+n_head = 8
 d_head = d_model // n_head
-n_stack = 2
+n_stack = 6
 p_dropout = 0.1
 
 training_steps = 100_000
 warmup_steps = 4000
+
+eval_interval = 500
+eval_iters = 50
 
 assert d_model % n_head == 0
 # ---------------
@@ -282,10 +285,11 @@ class AttentionReplica(nn.Module):
 #################
 # Tran / Generate
 
-torch.manual_seed(1337)
-random.seed(1337)
-
 m = AttentionReplica().to(device)
+
+ps = (p for p in m.parameters() if p.requires_grad)
+n_params = sum(p.numel() for p in ps)
+print(f'number of parameters: {n_params/1e6:.2f}M')
 
 def lr_lambda(step):
     step = max(step, 1)
@@ -294,16 +298,37 @@ def lr_lambda(step):
 optimizer = torch.optim.AdamW(m.parameters(), lr=1.0, betas=(0.9, 0.98))
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+def calculate_loss(logits, expected):
+    B, T, E = logits.shape
+    loss = F.cross_entropy(logits.view(B*T, E), expected.view(B*T), ignore_index=pad_token_idx, label_smoothing=0.1)
+    return loss
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    m.eval()
+    for split in ['train', 'eval']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            it_x, en_x, en_y = generate_batch(split)
+            logits = m(it_x, en_x)
+            loss = calculate_loss(logits, en_y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    m.train()
+    return out
+
+print('training')
 m.train()
 for iter in range(training_steps):
+    if iter == 0 or iter % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}")
+
     it_x, en_x, en_y = generate_batch('train')
 
     logits = m(it_x, en_x)
-    print(f'logits.shape: {logits.shape}, en_y.shape: {en_y.shape}')
-    B, T, E = logits.shape
-    loss = F.cross_entropy(logits.view(B*T, E), en_y.view(B*T), ignore_index=pad_token_idx, label_smoothing=0.1)
-    print(f'loss: {loss}')
-
+    loss = calculate_loss(logits, en_y)
     loss.backward()
     optimizer.step()
     scheduler.step()
