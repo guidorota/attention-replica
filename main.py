@@ -127,7 +127,7 @@ def generate_batch(dataset):
     en_x = pad([torch.cat([bos, s]) for s in en_seqs])
     en_y = pad([torch.cat([s, eos]) for s in en_seqs])
 
-    return it_x, en_x, en_y
+    return it_x.to(device), en_x.to(device), en_y.to(device)
 
 ##################
 # Model definition
@@ -285,7 +285,7 @@ class AttentionReplica(nn.Module):
 torch.manual_seed(1337)
 random.seed(1337)
 
-m = AttentionReplica()
+m = AttentionReplica().to(device)
 
 def lr_lambda(step):
     step = max(step, 1)
