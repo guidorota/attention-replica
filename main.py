@@ -13,13 +13,16 @@ if __name__ != "__main__":
 
 # Hyperparameters
 d_model = 512
-d_hid=4*d_model
+d_hid = 4 * d_model
 max_len = 600
 batch_size = 30
 n_head = 4
 d_head = d_model // n_head
 n_stack = 2
 p_dropout = 0.1
+
+training_steps = 100_000
+warmup_steps = 4000
 
 assert d_model % n_head == 0
 # ---------------
@@ -276,14 +279,30 @@ class AttentionReplica(nn.Module):
 #################
 # Tran / Generate
 
+torch.manual_seed(1337)
+random.seed(1337)
+
 m = AttentionReplica()
 
-it_x, en_x, en_y = generate_batch('train')
+def lr_lambda(step):
+    step = max(step, 1)
+    return d_model**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
 
-logits = m(it_x, en_x)
+optimizer = torch.optim.AdamW(m.parameters(), lr=1.0, betas=(0.9, 0.98))
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-print(logits.shape)
+for iter in range(training_steps):
+    it_x, en_x, en_y = generate_batch('train')
 
-# Must remember to ignore padding in loss!!!
+    logits = m(it_x, en_x)
+    print(f'logits.shape: {logits.shape}, en_y.shape: {en_y.shape}')
+    B, T, E = logits.shape
+    loss = F.cross_entropy(logits.view(B*T, E), en_y.view(B*T), ignore_index=pad_token_idx, label_smoothing=0.1)
+    print(f'loss: {loss}')
+
+    loss.backward()
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
 
 sys.exit(0)
