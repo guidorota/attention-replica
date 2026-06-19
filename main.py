@@ -13,8 +13,14 @@ if __name__ != "__main__":
 
 # Hyperparameters
 d_model = 512
+d_hid=4*d_model
 max_len = 600
 batch_size = 30
+n_head = 4
+d_head = d_model // n_head
+n_stack = 2
+
+assert d_model % n_head == 0
 # ---------------
 
 def detect_device() -> str:
@@ -44,14 +50,14 @@ for x in ds['translation']:
 
 ############
 # Vocabulary
-padding_token = '@'
+pad_token = '@'
 bos_token = '^'
 eos_token = '%'
 
 vocab = set("".join(it_full + en_full))
 
 # Adding extra tokens
-vocab.add(padding_token)
+vocab.add(pad_token)
 vocab.add(bos_token)
 vocab.add(eos_token)
 
@@ -67,7 +73,7 @@ itos = { i:ch for i,ch in enumerate(vocab) }
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda l: ''.join([itos[i] for i in l])
 
-padding_token_idx = stoi[padding_token]
+pad_token_idx = stoi[pad_token]
 bos_token_idx = stoi[bos_token]
 eos_token_idx = stoi[eos_token]
 
@@ -99,7 +105,7 @@ en_train_sorted_idx = sorted(range(len(en_train)), key=lambda i: len(en_train[i]
 en_eval_sorted_idx = sorted(range(len(en_train)), key=lambda i: len(en_train[i]))
 
 def pad(ls):
-    return nn.utils.rnn.pad_sequence(ls, batch_first=True, padding_value=padding_token_idx)
+    return nn.utils.rnn.pad_sequence(ls, batch_first=True, padding_value=pad_token_idx)
 
 def generate_batch(dataset):
     it_data = it_train if dataset == 'train' else it_eval
@@ -131,25 +137,100 @@ class PositionalEncoding(nn.Module):
         pos = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(pos * div_term)
-        pe[:, 1::2] = torch.cos(pos * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))   # (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)   # (1, max_len, d_model)
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
 
+
+class AttentionHead(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.q_wei = nn.Linear(d_model, d_head, bias=False)
+        self.k_wei = nn.Linear(d_model, d_head, bias=False)
+        self.v_wei = nn.Linear(d_model, d_head, bias=False)
+        self.register_buffer('causal_mask', torch.tril(torch.ones(max_len, max_len)) == 0)
+
+    def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
+        q = self.q_wei(q_x)
+        k = self.k_wei(kv_x)
+        v = self.v_wei(kv_x)
+
+        out = (q @ k.transpose(-1, -2))/d_head**0.5
+        out = out.masked_fill(pad_mask, float('-inf'))
+        if apply_causal_mask:
+            q_len = q_x.shape[1]
+            k_len = kv_x.shape[1]
+            out = out.masked_fill(self.causal_mask[:q_len,:k_len], float('-inf'))
+        out = F.softmax(out, dim=-1)
+        out = out @ v
+
+        return out
+
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.heads = nn.ModuleList(AttentionHead() for i in range(n_head)) # Can likely optimise by running in parallel as a single big matrix
+        self.linear = nn.Linear(d_model, d_model)
+
+    def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
+        out = [head(q_x, kv_x, pad_mask, apply_causal_mask) for head in self.heads]
+        out = torch.cat(out, dim=-1)
+        out = self.linear(out)
+        return out
+
+
 class FeedForward(nn.Module):
 
-    def __init__(self, d_model: int, d_hid: int):
+    def __init__(self):
         super().__init__()
         self.lin1 = nn.Linear(d_model, d_hid)
         self.relu = nn.ReLU()
         self.lin2 = nn.Linear(d_hid, d_model)
 
-    def forward(self, input):
-        out = self.lin1(input)
+    def forward(self, x):
+        out = self.lin1(x)
         out = self.relu(out)
         out = self.lin2(out)
         return out
+
+
+class EncoderStack(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.attn = MultiHeadAttention()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ffw = FeedForward()
+        self.ln2 = nn.LayerNorm(d_model)
+
+    def forward(self, x, pad_mask):
+        out = self.ln1(x + self.attn(x, x, pad_mask))
+        out = self.ln2(out + self.ffw(out))
+        return out
+
+
+class DecoderStack(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.attn = MultiHeadAttention()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.cross_attn = MultiHeadAttention()
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffw = FeedForward()
+        self.ln3 = nn.LayerNorm(d_model)
+
+    def forward(self, trs_x, pad_mask_trs_x, src_out, pad_mask_src_x):
+        out = self.ln1(trs_x + self.attn(trs_x, trs_x, pad_mask_trs_x, apply_causal_mask=True))
+        out = self.ln2(out + self.cross_attn(trs_x, src_out, pad_mask_src_x))
+        out = self.ln3(out + self.ffw(out))
+        return out
+
 
 class AttentionReplica(nn.Module):
 
@@ -157,17 +238,40 @@ class AttentionReplica(nn.Module):
         super().__init__()
         self.emb_table = nn.Embedding(vocab_size, d_model)
         self.pos_enc = PositionalEncoding()
+        self.encoder = nn.ModuleList([EncoderStack() for _ in range(n_stack)])
+        self.decoder = nn.ModuleList([DecoderStack() for _ in range(n_stack)])
+        self.linear = nn.Linear(d_model, vocab_size)
 
     def forward(self, src_x, trs_x):
+
+        pad_mask_src_x = (src_x == pad_token_idx).unsqueeze(-2)
+        pad_mask_trs_x = (trs_x == pad_token_idx).unsqueeze(-2)
+
+        # Encoder
         src_out = self.emb_table(src_x)
         src_out = self.pos_enc(src_out)
-        return None
+        for encoderStack in self.encoder:
+            src_out = encoderStack(src_out, pad_mask_src_x)
+
+        trs_out = self.emb_table(trs_x)
+        trs_out = self.pos_enc(trs_out)
+        for decoderStack in self.decoder:
+            trs_out = decoderStack(trs_out, pad_mask_trs_x, src_out, pad_mask_src_x)
+
+        trs_out = self.linear(trs_out)
+        return trs_out
+
+#################
+# Tran / Generate
 
 m = AttentionReplica()
 
 it_x, en_x, en_y = generate_batch('train')
 
-m(it_x, en_x)
+logits = m(it_x, en_x)
 
+print(logits.shape)
+
+# Must remember to ignore padding in loss!!!
 
 sys.exit(0)
