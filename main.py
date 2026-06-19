@@ -15,7 +15,7 @@ if __name__ != "__main__":
 d_model = 512
 d_hid = 4 * d_model
 max_len = 600
-batch_size = 30
+batch_size = 64
 n_head = 8
 d_head = d_model // n_head
 n_stack = 6
@@ -321,7 +321,7 @@ def estimate_loss():
 print('training')
 m.train()
 for iter in range(training_steps):
-    if iter == 0 or iter % eval_interval == 0:
+    if iter % eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}")
 

@@ -1,5 +1,26 @@
 # Attention Replica
 
+## TODO
+
+First batch (simple fixes then train):
+
+* bf16 autocast (see notes further down)
+* torch.compile - `m = torch.compile(m, dynamic=True)`
+
+Introduce a way to benchmark:
+
+* Add generation
+* BLEU
+
+Improve tokenization:
+
+* Switch to token budgeting for batches
+* Switch to word-piece tokenization
+
+Performance (nice to have):
+
+* Parallelise multi-head attention
+
 ## Notes
 
 * Training inputs
@@ -59,3 +80,64 @@ Another option called pool bucketing consists of creating big batches (50x times
 * Decoder self attention needs to pad both future tokens, and padding
 * Cross attention in the decoder needs to ignore input padding (as that's where K,V come from)
 * Padding needs to be also considered when calculating the loss (`ignore_index` in `F.cross_entropy()`)
+
+## bf16 autocast
+
+Similar optimisation needs to be done in the estimate for the eval / train loss. Might not work for mps.
+
+```(python)
+  for iter in range(training_steps):
+      it_x, en_x, en_y = generate_batch('train')
+
+      with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+          logits = m(it_x, en_x)
+          loss = calculate_loss(logits, en_y)
+
+      loss.backward()          # OUTSIDE autocast
+      optimizer.step()
+      scheduler.step()
+      optimizer.zero_grad(set_to_none=True)
+
+```
+
+## word-piece
+
+Train once across the full list of sentences (it/en)
+
+```(python)
+  from tokenizers import Tokenizer
+  from tokenizers.models import WordPiece
+  from tokenizers.trainers import WordPieceTrainer
+  from tokenizers.pre_tokenizers import Whitespace
+
+  tokenizer = Tokenizer(WordPiece(unk_token='[UNK]'))
+  tokenizer.pre_tokenizer = Whitespace()
+
+  trainer = WordPieceTrainer(
+      vocab_size=16000,                                   # 8k–32k typical, review paper
+      special_tokens=['[UNK]', '[PAD]', '[BOS]', '[EOS]'],
+  )
+
+  # train on the combined it+en text (shared vocab as the attention paper)
+  tokenizer.train_from_iterator(it_full + en_full, trainer)
+  tokenizer.save('tokenizer.json')                        # reload later with Tokenizer.from_file
+```
+
+Replace char level vocab and encode / decode
+
+```(python)
+  vocab_size      = tokenizer.get_vocab_size()
+  pad_token_idx   = tokenizer.token_to_id('[PAD]')
+  bos_token_idx   = tokenizer.token_to_id('[BOS]')
+  eos_token_idx   = tokenizer.token_to_id('[EOS]')
+
+  encode = lambda s: tokenizer.encode(s).ids
+  decode = lambda ids: tokenizer.decode(ids)
+```
+
+Use tokenizer in batch generation
+
+```(python)
+  it_train = [tokenizer.encode(x).ids for x in it_full[:split_index]]
+  en_train = [tokenizer.encode(x).ids for x in en_full[:split_index]]
+```
