@@ -19,6 +19,7 @@ batch_size = 30
 n_head = 4
 d_head = d_model // n_head
 n_stack = 2
+p_dropout = 0.1
 
 assert d_model % n_head == 0
 # ---------------
@@ -176,11 +177,13 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList(AttentionHead() for i in range(n_head)) # Can likely optimise by running in parallel as a single big matrix
         self.linear = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(p_dropout)
 
     def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
         out = [head(q_x, kv_x, pad_mask, apply_causal_mask) for head in self.heads]
         out = torch.cat(out, dim=-1)
         out = self.linear(out)
+        out = self.dropout(out)
         return out
 
 
@@ -191,11 +194,13 @@ class FeedForward(nn.Module):
         self.lin1 = nn.Linear(d_model, d_hid)
         self.relu = nn.ReLU()
         self.lin2 = nn.Linear(d_hid, d_model)
+        self.dropout = nn.Dropout(p_dropout)
 
     def forward(self, x):
         out = self.lin1(x)
         out = self.relu(out)
         out = self.lin2(out)
+        out = self.dropout(out)
         return out
 
 
@@ -238,8 +243,13 @@ class AttentionReplica(nn.Module):
         super().__init__()
         self.emb_table = nn.Embedding(vocab_size, d_model)
         self.pos_enc = PositionalEncoding()
+
         self.encoder = nn.ModuleList([EncoderStack() for _ in range(n_stack)])
+        self.enc_dropout = nn.Dropout(p_dropout)
+
         self.decoder = nn.ModuleList([DecoderStack() for _ in range(n_stack)])
+        self.dec_dropout = nn.Dropout(p_dropout)
+
         self.linear = nn.Linear(d_model, vocab_size)
 
     def forward(self, src_x, trs_x):
@@ -250,11 +260,13 @@ class AttentionReplica(nn.Module):
         # Encoder
         src_out = self.emb_table(src_x)
         src_out = self.pos_enc(src_out)
+        src_out = self.enc_dropout(src_out)
         for encoderStack in self.encoder:
             src_out = encoderStack(src_out, pad_mask_src_x)
 
         trs_out = self.emb_table(trs_x)
         trs_out = self.pos_enc(trs_out)
+        trs_out = self.dec_dropout(trs_out)
         for decoderStack in self.decoder:
             trs_out = decoderStack(trs_out, pad_mask_trs_x, src_out, pad_mask_src_x)
 
