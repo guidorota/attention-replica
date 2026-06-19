@@ -106,7 +106,7 @@ print(f'en eval length: {len(en_eval)}')
 #
 # Sorting on en to begin with, if it becomes a problem I'll revisit.
 en_train_sorted_idx = sorted(range(len(en_train)), key=lambda i: len(en_train[i]))
-en_eval_sorted_idx = sorted(range(len(en_train)), key=lambda i: len(en_train[i]))
+en_eval_sorted_idx = sorted(range(len(en_eval)), key=lambda i: len(en_eval[i]))
 
 def pad(ls):
     return nn.utils.rnn.pad_sequence(ls, batch_first=True, padding_value=pad_token_idx)
@@ -137,12 +137,14 @@ class PositionalEncoding(nn.Module):
     def __init__(self):
         super().__init__()
         # Pre-generate lookup table
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(max_len).unsqueeze(1)
+        pe_len = max_len + 1 # Accounts for adding bos / eos
+        pe = torch.zeros(pe_len, d_model)
+        pos = torch.arange(pe_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(pos * div_term)
+        pe[:, 1::2] = torch.cos(pos * div_term)
         pe = pe.unsqueeze(0)
-        self.register_buffer("pe", pe)   # (1, max_len, d_model)
+        self.register_buffer("pe", pe)   # (1, max_len + 1, d_model)
 
     def forward(self, x):
         return x + self.pe[:, :x.size(1)]
@@ -155,7 +157,8 @@ class AttentionHead(nn.Module):
         self.q_wei = nn.Linear(d_model, d_head, bias=False)
         self.k_wei = nn.Linear(d_model, d_head, bias=False)
         self.v_wei = nn.Linear(d_model, d_head, bias=False)
-        self.register_buffer('causal_mask', torch.tril(torch.ones(max_len, max_len)) == 0)
+        mask_len = max_len + 1 # Accounts for adding bos / eos
+        self.register_buffer('causal_mask', torch.tril(torch.ones(mask_len, mask_len)) == 0)
 
     def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
         q = self.q_wei(q_x)
@@ -235,7 +238,7 @@ class DecoderStack(nn.Module):
 
     def forward(self, trs_x, pad_mask_trs_x, src_out, pad_mask_src_x):
         out = self.ln1(trs_x + self.attn(trs_x, trs_x, pad_mask_trs_x, apply_causal_mask=True))
-        out = self.ln2(out + self.cross_attn(trs_x, src_out, pad_mask_src_x))
+        out = self.ln2(out + self.cross_attn(out, src_out, pad_mask_src_x))
         out = self.ln3(out + self.ffw(out))
         return out
 
@@ -244,7 +247,7 @@ class AttentionReplica(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.emb_table = nn.Embedding(vocab_size, d_model)
+        self.emb_table = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_idx)
         self.pos_enc = PositionalEncoding()
 
         self.encoder = nn.ModuleList([EncoderStack() for _ in range(n_stack)])
@@ -261,13 +264,13 @@ class AttentionReplica(nn.Module):
         pad_mask_trs_x = (trs_x == pad_token_idx).unsqueeze(-2)
 
         # Encoder
-        src_out = self.emb_table(src_x)
+        src_out = self.emb_table(src_x) * math.sqrt(d_model)
         src_out = self.pos_enc(src_out)
         src_out = self.enc_dropout(src_out)
         for encoderStack in self.encoder:
             src_out = encoderStack(src_out, pad_mask_src_x)
 
-        trs_out = self.emb_table(trs_x)
+        trs_out = self.emb_table(trs_x) * math.sqrt(d_model)
         trs_out = self.pos_enc(trs_out)
         trs_out = self.dec_dropout(trs_out)
         for decoderStack in self.decoder:
@@ -291,6 +294,7 @@ def lr_lambda(step):
 optimizer = torch.optim.AdamW(m.parameters(), lr=1.0, betas=(0.9, 0.98))
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+m.train()
 for iter in range(training_steps):
     it_x, en_x, en_y = generate_batch('train')
 
