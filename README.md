@@ -9,7 +9,7 @@ First batch (simple fixes then train):
 
 Introduce a way to benchmark:
 
-* Add generation
+* Add generation (need to add a way to switch between argmax and multinomial)
 * BLEU
 
 Improve tokenization:
@@ -20,6 +20,7 @@ Improve tokenization:
 Performance (nice to have):
 
 * Parallelise multi-head attention
+* Split encoding and decoding so that we don't run the encoding stack for every character of the output translation
 
 ## Notes
 

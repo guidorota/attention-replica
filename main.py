@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import random
 import math
+import sacrebleu
 from torch.nn import functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
@@ -22,9 +23,9 @@ n_stack = 6
 p_dropout = 0.1
 
 training_steps = 100_000
-warmup_steps = 4000
+warmup_steps = 4_000
 
-eval_interval = 500
+eval_interval = 1_000
 eval_iters = 50
 
 assert d_model % n_head == 0
@@ -282,8 +283,8 @@ class AttentionReplica(nn.Module):
         trs_out = self.linear(trs_out)
         return trs_out
 
-#################
-# Tran / Generate
+##################
+# Train / Generate
 
 m = AttentionReplica().to(device)
 
@@ -318,12 +319,65 @@ def estimate_loss():
     m.train()
     return out
 
+@torch.no_grad()
+def generate(src_x, max_new_tokens=max_len + 1):
+    was_training = m.training
+    m.eval()
+
+    B = src_x.shape[0]
+    src_x = src_x.to(device)
+    trs = torch.full((B, 1), bos_token_idx, dtype=torch.long, device=device)
+    finished = torch.zeros(B, dtype=torch.bool, device=device)
+
+    for _ in range(max_new_tokens):
+        logits = m(src_x, trs)                 # (B, T, vocab)
+        next_tok = logits[:, -1].argmax(-1)    # (B,), Add switch between argmax and multinomial so that we can use this function for BLEU and normal generation!!!
+        # once a sequence has emitted <eos>, keep it padded
+        next_tok = torch.where(finished, torch.full_like(next_tok, pad_token_idx), next_tok)
+        trs = torch.cat([trs, next_tok.unsqueeze(1)], dim=1)
+        finished |= (next_tok == eos_token_idx)
+        if finished.all():
+            break
+
+    if was_training:
+        m.train()
+    return trs   # (B, T), includes leading <bos>
+
+def ids_to_text(ids):
+    chars = []
+    for i in ids:
+        i = int(i)
+        if i == eos_token_idx:
+            break
+        if i in (bos_token_idx, pad_token_idx):
+            continue
+        chars.append(itos[i])
+    return ''.join(chars)
+
+@torch.no_grad()
+def estimate_bleu(n_sentences=512):
+    hyps, refs = [], []
+    # Walk the length-bucketed eval set to minimise padding, like generate_batch
+    # Not reusing generate_batch to ensure that sentences don't overlap between batches,
+    # and to ensure we're using the same sample every time (reproducibility).
+    for start in range(0, min(n_sentences, len(it_eval)), batch_size):
+        idxs = en_eval_sorted_idx[start:start + batch_size]
+        src_x = pad([torch.tensor(it_eval[i]) for i in idxs]).to(device)
+
+        out = generate(src_x)
+        hyps.extend(ids_to_text(row) for row in out)
+        refs.extend(decode(en_eval[i]) for i in idxs)
+
+    bleu = sacrebleu.corpus_bleu(hyps, [refs])
+    return bleu.score
+
 print('training')
 m.train()
 for iter in range(training_steps):
     if iter % eval_interval == 0:
         losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}")
+        bleu = estimate_bleu()
+        print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}, BLEU {bleu:.2f}")
 
     it_x, en_x, en_y = generate_batch('train')
 
