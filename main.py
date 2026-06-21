@@ -382,7 +382,7 @@ def estimate_bleu(n_sentences=512):
 
     # Emit some translated strings to visually debug how the model is doing
     for h, r in zip(hyps, refs):
-        print(f'  HYP: {h!r}\n  REF: {r!r}\n')
+        print(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {src_x!r}\n')
     bleu = sacrebleu.corpus_bleu(hyps, [refs])
     return bleu.score
 

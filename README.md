@@ -2,25 +2,22 @@
 
 ## TODO
 
-First batch (simple fixes then train):
-
-* bf16 autocast (see notes further down)
-* torch.compile - `m = torch.compile(m, dynamic=True)`
-
-Introduce a way to benchmark:
-
-* Add generation (need to add a way to switch between argmax and multinomial)
-* BLEU
-
 Improve tokenization:
 
 * Switch to token budgeting for batches
-* Switch to word-piece tokenization
+* Switch to word-piece tokenization (would be good to try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely)
 
 Performance (nice to have):
 
+* bf16 autocast (see notes further down)
+* torch.compile - `m = torch.compile(m, dynamic=True)`
 * Parallelise multi-head attention
 * Split encoding and decoding so that we don't run the encoding stack for every character of the output translation
+
+Additional changes
+
+* Use multinomial to add some variation to the translations
+* Train on a larger dataset
 
 ## Diary
 
@@ -38,6 +35,8 @@ Performance (nice to have):
   * Main culprits appears to be char level tokenization instead of wordpiece and significantly smaller dataset. Trying claude's suggestions:
     * move from post-ln to pre-ln (see "On Layer Normalization in the Transformer Architecture", also pre-ln is what karpathy uses in his lessons)
     * gradient clipping to ensure that a gradient spike can't influence the network too much
+* Performance is acceptable at the moment, deprioritising bf16 autoscale and `torch.compile`
+* First train run is resulting in overfitting (train loss decreases, 1.2557 @ 85_000, but eval loss and BLEU increase)
 
 ## Notes
 
@@ -59,7 +58,7 @@ Performance (nice to have):
   * HW puts a limitation (i.e., how many tokens can be processed in memory at training time)
   * Learning Rate LR is coupled to batch size
     * Bigger batches need "warmup" (used in the paper)
-    * LR needs to be changed proportionally to batch size (Adam / AdamW is LR scales batch_size**0.5)
+    * LR needs to be changed proportionally to batch size (Adam / AdamW is LR scales `batch_size**0.5`)
 * Split model and related hyperparams in a separate file
 * Implement wordpiece tokens (1609.08144)
 * Need to try `torch.compile`, however note this will only have benefits when moving to GPU training since support for mps is still in progress: [https://github.com/pytorch/pytorch/issues/150121](https://github.com/pytorch/pytorch/issues/150121)
