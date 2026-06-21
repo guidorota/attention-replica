@@ -38,6 +38,7 @@ Additional changes
 * First train run is resulting in overfitting (train loss decreases, 1.2557 @ 85_000, but eval loss and BLEU increase)
 * WordPiece tokenizer seems to significantly increase BLEU, reached 4.24 @ 20K steps
 * Multi-head attention parallelization done
+* Switched to Helsinki-NLP/opus-100, seeing BLEU 4.27 @ 10K steps
 
 ## Notes
 
