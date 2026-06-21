@@ -368,6 +368,9 @@ def estimate_bleu(n_sentences=512):
         hyps.extend(ids_to_text(row) for row in out)
         refs.extend(decode(en_eval[i]) for i in idxs)
 
+    # Emit some translated strings to visually debug how the model is doing
+    for h, r in zip(hyps[:5], refs[:5]):
+        print(f'  HYP: {h!r}\n  REF: {r!r}\n')
     bleu = sacrebleu.corpus_bleu(hyps, [refs])
     return bleu.score
 
