@@ -224,8 +224,10 @@ class EncoderStack(nn.Module):
         self.ln2 = nn.LayerNorm(d_model)
 
     def forward(self, x, pad_mask):
-        out = self.ln1(x + self.attn(x, x, pad_mask))
-        out = self.ln2(out + self.ffw(out))
+        # Pre-LN: normalise the input to each sublayer, keep the residual stream clean.
+        normed = self.ln1(x)
+        out = x + self.attn(normed, normed, pad_mask)
+        out = out + self.ffw(self.ln2(out))
         return out
 
 
@@ -241,9 +243,12 @@ class DecoderStack(nn.Module):
         self.ln3 = nn.LayerNorm(d_model)
 
     def forward(self, trs_x, pad_mask_trs_x, src_out, pad_mask_src_x):
-        out = self.ln1(trs_x + self.attn(trs_x, trs_x, pad_mask_trs_x, apply_causal_mask=True))
-        out = self.ln2(out + self.cross_attn(out, src_out, pad_mask_src_x))
-        out = self.ln3(out + self.ffw(out))
+        # Pre-LN: normalise each sublayer's input. src_out is the encoder memory,
+        # already normalised by the encoder's final LN, so it's used as-is for cross-attn k/v.
+        normed = self.ln1(trs_x)
+        out = trs_x + self.attn(normed, normed, pad_mask_trs_x, apply_causal_mask=True)
+        out = out + self.cross_attn(self.ln2(out), src_out, pad_mask_src_x)
+        out = out + self.ffw(self.ln3(out))
         return out
 
 
@@ -256,9 +261,11 @@ class AttentionReplica(nn.Module):
 
         self.encoder = nn.ModuleList([EncoderStack() for _ in range(n_stack)])
         self.enc_dropout = nn.Dropout(p_dropout)
+        self.enc_norm = nn.LayerNorm(d_model)  # Pre-LN: normalise encoder memory before it feeds cross-attn.
 
         self.decoder = nn.ModuleList([DecoderStack() for _ in range(n_stack)])
         self.dec_dropout = nn.Dropout(p_dropout)
+        self.dec_norm = nn.LayerNorm(d_model)  # Pre-LN: normalise decoder output before the projection.
 
         self.linear = nn.Linear(d_model, vocab_size)
 
@@ -273,12 +280,14 @@ class AttentionReplica(nn.Module):
         src_out = self.enc_dropout(src_out)
         for encoderStack in self.encoder:
             src_out = encoderStack(src_out, pad_mask_src_x)
+        src_out = self.enc_norm(src_out)
 
         trs_out = self.emb_table(trs_x) * math.sqrt(d_model)
         trs_out = self.pos_enc(trs_out)
         trs_out = self.dec_dropout(trs_out)
         for decoderStack in self.decoder:
             trs_out = decoderStack(trs_out, pad_mask_trs_x, src_out, pad_mask_src_x)
+        trs_out = self.dec_norm(trs_out)
 
         trs_out = self.linear(trs_out)
         return trs_out
@@ -392,6 +401,7 @@ for iter in range(training_steps):
     logits = m(it_x, en_x)
     loss = calculate_loss(logits, en_y)
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
     optimizer.step()
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
