@@ -16,7 +16,7 @@ if __name__ != "__main__":
 d_model = 512
 d_hid = 4 * d_model
 max_len = 600
-batch_size = 64
+batch_size = 32
 n_head = 8
 d_head = d_model // n_head
 n_stack = 6
@@ -25,7 +25,7 @@ p_dropout = 0.1
 training_steps = 100_000
 warmup_steps = 4_000
 
-eval_interval = 1_000
+eval_interval = 5_000
 eval_iters = 50
 
 assert d_model % n_head == 0
@@ -375,8 +375,10 @@ print('training')
 m.train()
 for iter in range(training_steps):
     if iter % eval_interval == 0:
+        print('estimating loss')
         losses = estimate_loss()
-        bleu = estimate_bleu()
+        print('estimating bleu')
+        bleu = estimate_bleu(n_sentences=64)
         print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}, BLEU {bleu:.2f}")
 
     it_x, en_x, en_y = generate_batch('train')

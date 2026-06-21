@@ -22,6 +22,18 @@ Performance (nice to have):
 * Parallelise multi-head attention
 * Split encoding and decoding so that we don't run the encoding stack for every character of the output translation
 
+## Diary
+
+### 2026-06-21
+
+* First training run on an NVIDIA GPU. A few learnings on the current code structure:
+  * `torch.compile` is way slower than expected, removing it temporarily to run a few training runs and find potential issues
+  * BLEU stats take a long time to run, increasing eval_interval (1_000 -> 5_000), and reducing n_sentence (512 -> 64)
+  * Running out of memory with batches of 64 sentences, reducing to 32 (arguably I should have run a training run with the longest sentences only to exclude OOMs mid-training)
+* Other observations from the very first training run:
+  * Loss is decreasing but doesn't seem to be converging very well (4.9994 -> 2.0221 -> 2.406 -> 2.1195 -> 2.3028 ...), need to investigate on this
+  * BLEU is still at zero even after a 25K training iterations, need to emit some stats to manually sample the quality of the translations
+
 ## Notes
 
 * Training inputs
