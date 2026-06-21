@@ -1,10 +1,5 @@
 import os
-# Must be set before torch initialises the CUDA allocator. expandable_segments
-# lets the caching allocator grow/shrink segments instead of reserving a fixed
-# block per tensor size, which avoids fragmentation blowups from our
-# variable-length batches and autoregressive generation (reserved memory then
-# tracks live usage instead of pinning most of the card). setdefault so an
-# explicit PYTORCH_CUDA_ALLOC_CONF from the environment still wins.
+# Must be set before torch initialises the CUDA allocator.
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import sys
 import torch
@@ -31,17 +26,16 @@ if __name__ != "__main__":
 d_model = 512
 d_hid = 4 * d_model
 max_len = 600
-batch_size = 128
+max_tokens = 25000
+gen_batch_size = 128 # Max generated batch size
 n_head = 8
 d_head = d_model // n_head
 n_stack = 6
 p_dropout = 0.1
 
-# Dataset + shared WordPiece tokenizer (trained once on the train split, cached
-# on disk; the filename embeds the dataset/vocab so a new corpus forces a retrain)
 dataset_name = "Helsinki-NLP/opus-100"
 target_vocab_size = 16000
-tokenizer_path = f'tokenizer-opus100-{target_vocab_size}.json'
+tokenizer_path = f"tokenizer-{dataset_name.split('/')[-1]}-{target_vocab_size}.json"
 
 training_steps = 100_000
 warmup_steps = 4_000
@@ -66,25 +60,28 @@ device = detect_device()
 print(f'device: {device}')
 
 #############################
-# Load and initialise dataset (opus-100 ships official train/validation/test)
+# Load and initialise dataset
 raw = load_dataset(dataset_name, "en-it")
 
-# Drop empty/whitespace pairs and cap length to eliminate outliers. For training
-# we also drop badly misaligned pairs via a source/target char length-ratio
-# filter (opus-100 carries some OPUS noise); the eval split keeps only the length
-# cap so BLEU stays comparable to a standard benchmark.
 def clean_split(split, apply_ratio):
+    n_discarded_malformed, n_discarded_len, n_discarded_ratio = 0, 0, 0
     it_out, en_out = [], []
     for x in split['translation']:
         it, en = x['it'].strip(), x['en'].strip()
         if not it or not en:
+            n_discarded_malformed += 1
             continue
-        if len(it) > max_len or len(en) > max_len:
+        if len(it) > 600 or len(en) > 600:
+            n_discarded_len += 1
             continue
         if apply_ratio and not (0.5 <= len(it) / len(en) <= 2.0):
+            n_discarded_ratio += 1
             continue
+        
         it_out.append(it)
         en_out.append(en)
+
+    print(f'total: {len(it_out)}, malformend: {n_discarded_malformed}, > {600}: {n_discarded_len}, bad ratio: {n_discarded_ratio if apply_ratio == True else False}')
     return it_out, en_out
 
 it_train_txt, en_train_txt = clean_split(raw['train'], apply_ratio=True)
@@ -97,9 +94,6 @@ bos_token = '[BOS]'
 eos_token = '[EOS]'
 unk_token = '[UNK]'
 
-# Train a shared WordPiece tokenizer over the combined it+en TRAIN text (as in
-# the attention paper), caching it on disk so we only pay the training cost once.
-# Train split only, so val/test never leak into the vocabulary.
 if os.path.exists(tokenizer_path):
     print(f'loading tokenizer from {tokenizer_path}')
     tokenizer = Tokenizer.from_file(tokenizer_path)
@@ -107,7 +101,7 @@ else:
     print('training tokenizer')
     tokenizer = Tokenizer(WordPiece(unk_token=unk_token))
     tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.decoder = WordPieceDecoder()  # merge ## continuations back into words on decode
+    tokenizer.decoder = WordPieceDecoder()
     trainer = WordPieceTrainer(
         vocab_size=target_vocab_size,
         special_tokens=[pad_token, bos_token, eos_token, unk_token],
@@ -122,16 +116,13 @@ print(f'vocab_size: {vocab_size}')
 # Encode / Decode
 encode = lambda s: tokenizer.encode(s).ids
 decode = lambda ids: tokenizer.decode(ids)
-# encode_batch runs multithreaded in Rust — far faster than a Python loop over
-# the ~1M-sentence train split.
+# using tokenizer.encode_batch as it's faster than iterating on each in Python
 encode_all = lambda texts: [e.ids for e in tokenizer.encode_batch(texts)]
 
 pad_token_idx = tokenizer.token_to_id(pad_token)
 bos_token_idx = tokenizer.token_to_id(bos_token)
 eos_token_idx = tokenizer.token_to_id(eos_token)
 
-######################
-# Encode train and eval (official opus-100 splits)
 it_train = encode_all(it_train_txt)
 en_train = encode_all(en_train_txt)
 it_eval = encode_all(it_eval_txt)
@@ -144,41 +135,51 @@ print(f'en eval length: {len(en_eval)}')
 
 ##################
 # Batch generation
+def seq_len(it_data, en_data, i):
+    # +1 on the target accounts for the bos/eos added at collate time
+    return max(len(it_data[i]), len(en_data[i]) + 1)
 
-# Sorting on en as that's the translation target.
-#
-# This ends up leaving a wide gap between min / max length in the it batch entries,
-# but after looking at the length distribution of both it and en datasets it seems
-# inevitable, and it's either a question of having it happening on the it or en side.
-#
-# Sorting on en to begin with, if it becomes a problem I'll revisit.
-en_train_sorted_idx = sorted(range(len(en_train)), key=lambda i: len(en_train[i]))
-en_eval_sorted_idx = sorted(range(len(en_eval)), key=lambda i: len(en_eval[i]))
+def build_token_batches(it_data, en_data):
+    order = sorted(range(len(it_data)), key=lambda i: seq_len(it_data, en_data, i))
+    batches, cur, cur_max = [], [], 0
+    for i in order:
+        new_max = max(cur_max, seq_len(it_data, en_data, i))
+        if cur and new_max * (len(cur) + 1) > max_tokens: # Calculates the nr. of tokens we'd need to add to the batch after padding
+            batches.append(cur)
+            cur, new_max = [], seq_len(it_data, en_data, i)
+        cur.append(i)
+        cur_max = new_max
+    if cur:
+        batches.append(cur)
+    return batches
+
+train_batches = build_token_batches(it_train, en_train)
+eval_batches = build_token_batches(it_eval, en_eval)
+# Length-sorted eval order for the deterministic BLEU sample (across all lengths)
+eval_sorted_idx = sorted(range(len(en_eval)), key=lambda i: seq_len(it_eval, en_eval, i))
+print(f'train batches: {len(train_batches)}, eval batches: {len(eval_batches)} (~{max_tokens} tokens each)')
 
 def pad(ls):
     return nn.utils.rnn.pad_sequence(ls, batch_first=True, padding_value=pad_token_idx)
 
-def generate_batch(dataset):
-    it_data = it_train if dataset == 'train' else it_eval
-    en_data = en_train if dataset == 'train' else en_eval
-    sorted_idx = en_train_sorted_idx if dataset == 'train' else en_eval_sorted_idx
-
-    idx_start = random.randint(0, len(it_data) - batch_size)
-    idxs = sorted_idx[idx_start:idx_start+batch_size]
-
-    it_x = pad([torch.tensor(it_data[x]) for x in idxs])
+def collate(idxs, it_data, en_data):
+    it_x = pad([torch.tensor(it_data[i]) for i in idxs])
 
     bos = torch.tensor([bos_token_idx])
     eos = torch.tensor([eos_token_idx])
-    en_seqs = [torch.tensor(en_data[x]) for x in idxs]
+    en_seqs = [torch.tensor(en_data[i]) for i in idxs]
     en_x = pad([torch.cat([bos, s]) for s in en_seqs])
     en_y = pad([torch.cat([s, eos]) for s in en_seqs])
 
     return it_x.to(device), en_x.to(device), en_y.to(device)
 
+def generate_batch(dataset):
+    if dataset == 'train':
+        return collate(random.choice(train_batches), it_train, en_train)
+    return collate(random.choice(eval_batches), it_eval, en_eval)
+
 ##################
 # Model definition
-
 class PositionalEncoding(nn.Module):
 
     def __init__(self):
@@ -405,12 +406,12 @@ def estimate_bleu(n_sentences=512, max_print=None):
     hyps, refs, srcs = [], [], []
     # Walk the length-bucketed eval set to minimise padding, like generate_batch
     # Not reusing generate_batch to ensure that sentences don't overlap between batches,
-    # and to ensure we're using the same sample every time (reproducibility).
-    n_sentences = min(n_sentences, len(en_eval_sorted_idx))
-    stride = len(en_eval_sorted_idx) / n_sentences
-    sample_idx = [en_eval_sorted_idx[int(i * stride)] for i in range(n_sentences)]
-    for start in range(0, min(n_sentences, len(it_eval)), batch_size):
-        idxs = sample_idx[start:start + batch_size]
+    # and ensures we're using the same samples every time (reproducibility).
+    n_sentences = min(n_sentences, len(eval_sorted_idx))
+    stride = len(eval_sorted_idx) / n_sentences
+    sample_idx = [eval_sorted_idx[int(i * stride)] for i in range(n_sentences)]
+    for start in range(0, min(n_sentences, len(it_eval)), gen_batch_size):
+        idxs = sample_idx[start:start + gen_batch_size]
         src_x = pad([torch.tensor(it_eval[i]) for i in idxs]).to(device)
 
         out = generate(src_x)

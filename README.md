@@ -2,11 +2,6 @@
 
 ## TODO
 
-Improve tokenization:
-
-* Switch to token budgeting for batches
-* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely.
-
 Performance (nice to have):
 
 * bf16 autocast (see notes further down)
@@ -15,10 +10,17 @@ Performance (nice to have):
 
 Additional changes
 
+* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely.
 * Use multinomial to add some variation to the translations
 * Train on a larger dataset
 
 ## Diary
+
+### 2026-06-22
+
+* Full 100K run on batches capped by token count instead of sentence count. Best one so far, final BLEU is 16.45
+  * BLEU is fluctuating a lot when training, not sure if it's real or if it's due to the small sample size
+  * Next up, need to print more meaningful stats (likely better BLEU at every 5K) to determine
 
 ### 2026-06-21
 
@@ -38,7 +40,7 @@ Additional changes
 * First train run is resulting in overfitting (train loss decreases, 1.2557 @ 85_000, but eval loss and BLEU increase)
 * WordPiece tokenizer seems to significantly increase BLEU, reached 4.24 @ 20K steps
 * Multi-head attention parallelization done
-* Switched to Helsinki-NLP/opus-100, seeing BLEU 4.27 @ 10K steps
+* Switched to Helsinki-NLP/opus-100, seeing BLEU 4.27 @ 10K steps, final bleu 13.45 (100K training steps). Best run so far. Next I want to try batching by token count
 
 ## Notes
 
