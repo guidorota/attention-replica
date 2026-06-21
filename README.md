@@ -5,7 +5,7 @@
 Improve tokenization:
 
 * Switch to token budgeting for batches
-* Switch to word-piece tokenization (would be good to try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely)
+* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely.
 
 Performance (nice to have):
 
@@ -37,6 +37,7 @@ Additional changes
     * gradient clipping to ensure that a gradient spike can't influence the network too much
 * Performance is acceptable at the moment, deprioritising bf16 autoscale and `torch.compile`
 * First train run is resulting in overfitting (train loss decreases, 1.2557 @ 85_000, but eval loss and BLEU increase)
+* WordPiece tokenizer seems to significantly increase BLEU, reached 4.24 @ 20K steps
 
 ## Notes
 

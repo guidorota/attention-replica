@@ -1,3 +1,4 @@
+import os
 import sys
 import torch
 import torch.nn as nn
@@ -7,6 +8,11 @@ import sacrebleu
 from torch.nn import functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
+from tokenizers import Tokenizer
+from tokenizers.models import WordPiece
+from tokenizers.trainers import WordPieceTrainer
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.decoders import WordPiece as WordPieceDecoder
 
 # Invocation guard
 if __name__ != "__main__":
@@ -21,6 +27,10 @@ n_head = 8
 d_head = d_model // n_head
 n_stack = 6
 p_dropout = 0.1
+
+# WordPiece tokenizer (shared it/en vocab, trained once and cached on disk)
+target_vocab_size = 16000
+tokenizer_path = 'tokenizer.json'
 
 training_steps = 100_000
 warmup_steps = 4_000
@@ -58,41 +68,48 @@ for x in ds['translation']:
 
 ############
 # Vocabulary
-pad_token = '@'
-bos_token = '^'
-eos_token = '%'
+pad_token = '[PAD]'
+bos_token = '[BOS]'
+eos_token = '[EOS]'
+unk_token = '[UNK]'
 
-vocab = set("".join(it_full + en_full))
+# Train a shared WordPiece tokenizer over the combined it+en corpus (as in the
+# attention paper), caching it on disk so we only pay the training cost once.
+if os.path.exists(tokenizer_path):
+    print(f'loading tokenizer from {tokenizer_path}')
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+else:
+    print('training tokenizer')
+    tokenizer = Tokenizer(WordPiece(unk_token=unk_token))
+    tokenizer.pre_tokenizer = Whitespace()
+    tokenizer.decoder = WordPieceDecoder()  # merge ## continuations back into words on decode
+    trainer = WordPieceTrainer(
+        vocab_size=target_vocab_size,
+        special_tokens=[pad_token, bos_token, eos_token, unk_token],
+    )
+    tokenizer.train_from_iterator(it_full + en_full, trainer)
+    tokenizer.save(tokenizer_path)
 
-# Adding extra tokens
-vocab.add(pad_token)
-vocab.add(bos_token)
-vocab.add(eos_token)
-
-vocab = sorted(list(vocab))
-vocab_size = len(vocab)
-
+vocab_size = tokenizer.get_vocab_size()
 print(f'vocab_size: {vocab_size}')
 
 #################
 # Encode / Decode
-stoi = { ch:i for i,ch in enumerate(vocab) }
-itos = { i:ch for i,ch in enumerate(vocab) }
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
+encode = lambda s: tokenizer.encode(s).ids
+decode = lambda ids: tokenizer.decode(ids)
 
-pad_token_idx = stoi[pad_token]
-bos_token_idx = stoi[bos_token]
-eos_token_idx = stoi[eos_token]
+pad_token_idx = tokenizer.token_to_id(pad_token)
+bos_token_idx = tokenizer.token_to_id(bos_token)
+eos_token_idx = tokenizer.token_to_id(eos_token)
 
 ######################
 # Split train and eval
 split_index = int(0.9 * len(it_full))
 
-it_train = [[stoi[c] for c in x] for x in it_full[:split_index]]
-en_train = [[stoi[c] for c in x] for x in en_full[:split_index]]
-it_eval = [[stoi[c] for c in x] for x in it_full[split_index:]]
-en_eval = [[stoi[c] for c in x] for x in en_full[split_index:]]
+it_train = [encode(x) for x in it_full[:split_index]]
+en_train = [encode(x) for x in en_full[:split_index]]
+it_eval = [encode(x) for x in it_full[split_index:]]
+en_eval = [encode(x) for x in en_full[split_index:]]
 
 print(f'it train length: {len(it_train)}')
 print(f'en train length: {len(en_train)}')
@@ -353,19 +370,16 @@ def generate(src_x, max_new_tokens=max_len + 1):
     return trs   # (B, T), includes leading <bos>
 
 def ids_to_text(ids):
-    chars = []
-    for i in ids:
-        i = int(i)
-        if i == eos_token_idx:
-            break
-        if i in (bos_token_idx, pad_token_idx):
-            continue
-        chars.append(itos[i])
-    return ''.join(chars)
+    ids = [int(i) for i in ids]
+    # Cut at the first <eos> so we don't decode trailing padding, then let the
+    # tokenizer drop the remaining special tokens and merge the wordpieces.
+    if eos_token_idx in ids:
+        ids = ids[:ids.index(eos_token_idx)]
+    return tokenizer.decode(ids)
 
 @torch.no_grad()
 def estimate_bleu(n_sentences=512):
-    hyps, refs = [], []
+    hyps, refs, srcs = [], [], []
     # Walk the length-bucketed eval set to minimise padding, like generate_batch
     # Not reusing generate_batch to ensure that sentences don't overlap between batches,
     # and to ensure we're using the same sample every time (reproducibility).
@@ -379,10 +393,12 @@ def estimate_bleu(n_sentences=512):
         out = generate(src_x)
         hyps.extend(ids_to_text(row) for row in out)
         refs.extend(decode(en_eval[i]) for i in idxs)
+        srcs.extend(decode(it_eval[i]) for i in idxs)
+
 
     # Emit some translated strings to visually debug how the model is doing
-    for h, r in zip(hyps, refs):
-        print(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {src_x!r}\n')
+    for h, r, s in zip(hyps, refs, srcs):
+        print(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {s!r}\n')
     bleu = sacrebleu.corpus_bleu(hyps, [refs])
     return bleu.score
 
