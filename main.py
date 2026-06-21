@@ -237,6 +237,37 @@ class MultiHeadAttention(nn.Module):
         out = self.dropout(out)
         return out
 
+    # --- Incremental cached attention, used only by generate() ---
+    def _project_heads(self, lin, tok_x):
+        B, T, _ = tok_x.shape
+        return lin(tok_x).view(B, T, n_head, d_head).transpose(1, 2)
+
+    def step_self_attn(self, tok_x, cache):
+        q = self._project_heads(self.q_wei, tok_x)
+        k = self._project_heads(self.k_wei, tok_x)
+        v = self._project_heads(self.v_wei, tok_x)
+        if cache['k'] is not None:
+            k = torch.cat([cache['k'], k], dim=2)
+            v = torch.cat([cache['v'], v], dim=2)
+        cache['k'], cache['v'] = k, v
+        # Causal mask is implicit and not needed when processing one token at a time
+        # since we have no "future" tokens
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(1, 2).reshape(tok_x.shape[0], 1, d_model)
+        return self.dropout(self.linear(out))
+
+    def step_cross_attn(self, tok_x, cache, memory, pad_mask_src):
+        # Source K/V depend only on the fixed encoder memory, so compute them once.
+        q = self._project_heads(self.q_wei, tok_x)
+        if cache['k'] is None:
+            cache['k'] = self._project_heads(self.k_wei, memory)
+            cache['v'] = self._project_heads(self.v_wei, memory)
+        attn_mask = torch.zeros_like(pad_mask_src, dtype=q.dtype) \
+            .masked_fill(pad_mask_src, float('-inf')).unsqueeze(1)
+        out = F.scaled_dot_product_attention(q, cache['k'], cache['v'], attn_mask=attn_mask)
+        out = out.transpose(1, 2).reshape(tok_x.shape[0], 1, d_model)
+        return self.dropout(self.linear(out))
+
 
 class FeedForward(nn.Module):
 
@@ -292,6 +323,12 @@ class DecoderStack(nn.Module):
         out = out + self.ffw(self.ln3(out))
         return out
 
+    def step(self, x, memory, pad_mask_src, cache): # Single token
+        x = x + self.attn.step_self_attn(self.ln1(x), cache['self'])
+        x = x + self.cross_attn.step_cross_attn(self.ln2(x), cache['cross'], memory, pad_mask_src)
+        x = x + self.ffw(self.ln3(x))
+        return x
+
 
 class AttentionReplica(nn.Module):
 
@@ -302,26 +339,28 @@ class AttentionReplica(nn.Module):
 
         self.encoder = nn.ModuleList([EncoderStack() for _ in range(n_stack)])
         self.enc_dropout = nn.Dropout(p_dropout)
-        self.enc_norm = nn.LayerNorm(d_model)  # Pre-LN: normalise encoder memory before it feeds cross-attn.
+        self.enc_norm = nn.LayerNorm(d_model)
 
         self.decoder = nn.ModuleList([DecoderStack() for _ in range(n_stack)])
         self.dec_dropout = nn.Dropout(p_dropout)
-        self.dec_norm = nn.LayerNorm(d_model)  # Pre-LN: normalise decoder output before the projection.
+        self.dec_norm = nn.LayerNorm(d_model)
 
         self.linear = nn.Linear(d_model, vocab_size)
+
+    def encode(self, src_x, pad_mask_src_x):
+        src_out = self.emb_table(src_x) * math.sqrt(d_model)
+        src_out = self.pos_enc(src_out)
+        src_out = self.enc_dropout(src_out)
+        for encoderStack in self.encoder:
+            src_out = encoderStack(src_out, pad_mask_src_x)
+        return self.enc_norm(src_out)
 
     def forward(self, src_x, trs_x):
 
         pad_mask_src_x = (src_x == pad_token_idx).unsqueeze(-2)
         pad_mask_trs_x = (trs_x == pad_token_idx).unsqueeze(-2)
 
-        # Encoder
-        src_out = self.emb_table(src_x) * math.sqrt(d_model)
-        src_out = self.pos_enc(src_out)
-        src_out = self.enc_dropout(src_out)
-        for encoderStack in self.encoder:
-            src_out = encoderStack(src_out, pad_mask_src_x)
-        src_out = self.enc_norm(src_out)
+        src_out = self.encode(src_x, pad_mask_src_x)
 
         trs_out = self.emb_table(trs_x) * math.sqrt(d_model)
         trs_out = self.pos_enc(trs_out)
@@ -333,9 +372,19 @@ class AttentionReplica(nn.Module):
         trs_out = self.linear(trs_out)
         return trs_out
 
+    def decode_step(self, tok, pos, memory, pad_mask_src, caches):
+        # Encode and add new token
+        x = self.emb_table(tok) * math.sqrt(d_model)
+        x = x + self.pos_enc.pe[:, pos:pos + 1]
+
+        x = self.dec_dropout(x)
+        for layer, cache in zip(self.decoder, caches):
+            x = layer.step(x, memory, pad_mask_src, cache)
+        x = self.dec_norm(x)
+        return self.linear(x)[:, -1]
+
 ##################
 # Train / Generate
-
 m = AttentionReplica().to(device)
 
 ps = (p for p in m.parameters() if p.requires_grad)
@@ -376,12 +425,22 @@ def generate(src_x, max_new_tokens=max_len + 1):
 
     B = src_x.shape[0]
     src_x = src_x.to(device)
+
+    pad_mask_src = (src_x == pad_token_idx).unsqueeze(-2)
+    memory = m.encode(src_x, pad_mask_src) # Cache and reuse encoder result
+
+    # Per-layer K/V caches: self-attn grows each step, cross-attn computed once.
+    caches = [{'self': {'k': None, 'v': None}, 'cross': {'k': None, 'v': None}}
+              for _ in range(n_stack)]
+
     trs = torch.full((B, 1), bos_token_idx, dtype=torch.long, device=device)
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
     for _ in range(max_new_tokens):
-        logits = m(src_x, trs)                 # (B, T, vocab)
-        next_tok = logits[:, -1].argmax(-1)    # (B,), Add switch between argmax and multinomial so that we can use this function for BLEU and normal generation!!!
+        pos = trs.shape[1] - 1
+        # Only the new token is fed, kv is cached, encoder data is precomputed
+        logits = m.decode_step(trs[:, -1:], pos, memory, pad_mask_src, caches)
+        next_tok = logits.argmax(-1)
         # once a sequence has emitted <eos>, keep it padded
         next_tok = torch.where(finished, torch.full_like(next_tok, pad_token_idx), next_tok)
         trs = torch.cat([trs, next_tok.unsqueeze(1)], dim=1)
@@ -391,7 +450,7 @@ def generate(src_x, max_new_tokens=max_len + 1):
 
     if was_training:
         m.train()
-    return trs   # (B, T), includes leading <bos>
+    return trs
 
 def ids_to_text(ids):
     ids = [int(i) for i in ids]
@@ -472,6 +531,7 @@ t = now()
 final_bleu = estimate_bleu(n_sentences=512, max_print=10)
 print(f"final BLEU (512 sentences): {final_bleu:.2f} in {now()-t:.0f}s")
 
+##############
 # Save weights
 timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
 ckpt_path = f'attention-replica-{timestamp}.pt'

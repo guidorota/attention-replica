@@ -6,7 +6,7 @@ Performance (nice to have):
 
 * bf16 autocast (see notes further down)
 * torch.compile - `m = torch.compile(m, dynamic=True)`
-* Split encoding and decoding so that we don't run the encoding stack for every character of the output translation
+* ~~Split encoding and decoding so that we don't run the encoding stack for every character of the output translation~~ (done: `generate()` encodes once, then decodes incrementally with per-layer K/V caches — self-attn K/V grow per step, cross-attn K/V computed once from the encoder memory. Verified numerically identical to the full forward, ~7x faster at 80 steps)
 
 Additional changes
 
