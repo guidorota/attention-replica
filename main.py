@@ -11,7 +11,9 @@ import torch
 import torch.nn as nn
 import random
 import math
+import time
 import sacrebleu
+from datetime import datetime
 from torch.nn import functional as F
 from datasets import load_dataset
 from dotenv import load_dotenv
@@ -29,15 +31,17 @@ if __name__ != "__main__":
 d_model = 512
 d_hid = 4 * d_model
 max_len = 600
-batch_size = 128
+batch_size = 192
 n_head = 8
 d_head = d_model // n_head
 n_stack = 6
 p_dropout = 0.1
 
-# WordPiece tokenizer (shared it/en vocab, trained once and cached on disk)
+# Dataset + shared WordPiece tokenizer (trained once on the train split, cached
+# on disk; the filename embeds the dataset/vocab so a new corpus forces a retrain)
+dataset_name = "Helsinki-NLP/opus-100"
 target_vocab_size = 16000
-tokenizer_path = 'tokenizer.json'
+tokenizer_path = f'tokenizer-opus100-{target_vocab_size}.json'
 
 training_steps = 100_000
 warmup_steps = 4_000
@@ -62,16 +66,29 @@ device = detect_device()
 print(f'device: {device}')
 
 #############################
-# Load and initialise dataset
-ds = load_dataset("Helsinki-NLP/opus_books", "en-it")['train']
+# Load and initialise dataset (opus-100 ships official train/validation/test)
+raw = load_dataset(dataset_name, "en-it")
 
-it_full, en_full = [], []
-for x in ds['translation']:
-    # Cap max length to eliminate outliers
-    if len(x['it']) > max_len or len(x['en']) > max_len:
-        continue
-    it_full.append(x['it'])
-    en_full.append(x['en'])
+# Drop empty/whitespace pairs and cap length to eliminate outliers. For training
+# we also drop badly misaligned pairs via a source/target char length-ratio
+# filter (opus-100 carries some OPUS noise); the eval split keeps only the length
+# cap so BLEU stays comparable to a standard benchmark.
+def clean_split(split, apply_ratio):
+    it_out, en_out = [], []
+    for x in split['translation']:
+        it, en = x['it'].strip(), x['en'].strip()
+        if not it or not en:
+            continue
+        if len(it) > max_len or len(en) > max_len:
+            continue
+        if apply_ratio and not (0.5 <= len(it) / len(en) <= 2.0):
+            continue
+        it_out.append(it)
+        en_out.append(en)
+    return it_out, en_out
+
+it_train_txt, en_train_txt = clean_split(raw['train'], apply_ratio=True)
+it_eval_txt, en_eval_txt = clean_split(raw['validation'], apply_ratio=False)
 
 ############
 # Vocabulary
@@ -80,8 +97,9 @@ bos_token = '[BOS]'
 eos_token = '[EOS]'
 unk_token = '[UNK]'
 
-# Train a shared WordPiece tokenizer over the combined it+en corpus (as in the
-# attention paper), caching it on disk so we only pay the training cost once.
+# Train a shared WordPiece tokenizer over the combined it+en TRAIN text (as in
+# the attention paper), caching it on disk so we only pay the training cost once.
+# Train split only, so val/test never leak into the vocabulary.
 if os.path.exists(tokenizer_path):
     print(f'loading tokenizer from {tokenizer_path}')
     tokenizer = Tokenizer.from_file(tokenizer_path)
@@ -94,7 +112,7 @@ else:
         vocab_size=target_vocab_size,
         special_tokens=[pad_token, bos_token, eos_token, unk_token],
     )
-    tokenizer.train_from_iterator(it_full + en_full, trainer)
+    tokenizer.train_from_iterator(it_train_txt + en_train_txt, trainer)
     tokenizer.save(tokenizer_path)
 
 vocab_size = tokenizer.get_vocab_size()
@@ -104,19 +122,20 @@ print(f'vocab_size: {vocab_size}')
 # Encode / Decode
 encode = lambda s: tokenizer.encode(s).ids
 decode = lambda ids: tokenizer.decode(ids)
+# encode_batch runs multithreaded in Rust — far faster than a Python loop over
+# the ~1M-sentence train split.
+encode_all = lambda texts: [e.ids for e in tokenizer.encode_batch(texts)]
 
 pad_token_idx = tokenizer.token_to_id(pad_token)
 bos_token_idx = tokenizer.token_to_id(bos_token)
 eos_token_idx = tokenizer.token_to_id(eos_token)
 
 ######################
-# Split train and eval
-split_index = int(0.9 * len(it_full))
-
-it_train = [encode(x) for x in it_full[:split_index]]
-en_train = [encode(x) for x in en_full[:split_index]]
-it_eval = [encode(x) for x in it_full[split_index:]]
-en_eval = [encode(x) for x in en_full[split_index:]]
+# Encode train and eval (official opus-100 splits)
+it_train = encode_all(it_train_txt)
+en_train = encode_all(en_train_txt)
+it_eval = encode_all(it_eval_txt)
+en_eval = encode_all(en_eval_txt)
 
 print(f'it train length: {len(it_train)}')
 print(f'en train length: {len(en_train)}')
@@ -382,7 +401,7 @@ def ids_to_text(ids):
     return tokenizer.decode(ids)
 
 @torch.no_grad()
-def estimate_bleu(n_sentences=512):
+def estimate_bleu(n_sentences=512, max_print=None):
     hyps, refs, srcs = [], [], []
     # Walk the length-bucketed eval set to minimise padding, like generate_batch
     # Not reusing generate_batch to ensure that sentences don't overlap between batches,
@@ -399,22 +418,40 @@ def estimate_bleu(n_sentences=512):
         refs.extend(decode(en_eval[i]) for i in idxs)
         srcs.extend(decode(it_eval[i]) for i in idxs)
 
-
-    # Emit some translated strings to visually debug how the model is doing
-    for h, r, s in zip(hyps, refs, srcs):
+    samples = list(zip(hyps, refs, srcs))
+    if max_print is not None:
+        samples = samples[:max_print]
+    for h, r, s in samples:
         print(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {s!r}\n')
     bleu = sacrebleu.corpus_bleu(hyps, [refs])
     return bleu.score
 
+def now():
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
 print('training')
 m.train()
+total_start = now()
+train_start = now()
 for iter in range(training_steps):
     if iter % eval_interval == 0:
-        print('estimating loss')
-        losses = estimate_loss()
-        print('estimating bleu')
-        bleu = estimate_bleu(n_sentences=64)
+        train_elapsed = now() - train_start
+
+        t = now(); losses = estimate_loss();             loss_elapsed = now() - t
+        t = now(); bleu = estimate_bleu(n_sentences=64); bleu_elapsed = now() - t
+
         print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}, BLEU {bleu:.2f}")
+        if iter == 0:
+            print(f"  timing: loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | total {now()-total_start:.0f}s")
+        else:
+            print(f"  timing: {eval_interval} train steps {train_elapsed:.1f}s "
+                  f"({train_elapsed/eval_interval*1000:.0f}ms/step) | "
+                  f"loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | "
+                  f"total {now()-total_start:.0f}s")
+
+        train_start = now()
 
     it_x, en_x, en_y = generate_batch('train')
 
@@ -425,5 +462,19 @@ for iter in range(training_steps):
     optimizer.step()
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
+
+total_elapsed = now() - total_start
+print(f"training complete: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min) over {training_steps} steps")
+
+print('final bleu on 512 sentences')
+t = now()
+final_bleu = estimate_bleu(n_sentences=512, max_print=10)
+print(f"final BLEU (512 sentences): {final_bleu:.2f} in {now()-t:.0f}s")
+
+# Save weights
+timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+ckpt_path = f'attention-replica-{timestamp}.pt'
+torch.save(m.state_dict(), ckpt_path)
+print(f'saved weights to {ckpt_path}')
 
 sys.exit(0)
