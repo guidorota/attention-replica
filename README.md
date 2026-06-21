@@ -11,7 +11,6 @@ Performance (nice to have):
 
 * bf16 autocast (see notes further down)
 * torch.compile - `m = torch.compile(m, dynamic=True)`
-* Parallelise multi-head attention
 * Split encoding and decoding so that we don't run the encoding stack for every character of the output translation
 
 Additional changes
@@ -38,6 +37,7 @@ Additional changes
 * Performance is acceptable at the moment, deprioritising bf16 autoscale and `torch.compile`
 * First train run is resulting in overfitting (train loss decreases, 1.2557 @ 85_000, but eval loss and BLEU increase)
 * WordPiece tokenizer seems to significantly increase BLEU, reached 4.24 @ 20K steps
+* Multi-head attention parallelization done
 
 ## Notes
 

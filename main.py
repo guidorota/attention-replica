@@ -1,4 +1,11 @@
 import os
+# Must be set before torch initialises the CUDA allocator. expandable_segments
+# lets the caching allocator grow/shrink segments instead of reserving a fixed
+# block per tensor size, which avoids fragmentation blowups from our
+# variable-length batches and autoregressive generation (reserved memory then
+# tracks live usage instead of pinning most of the card). setdefault so an
+# explicit PYTORCH_CUDA_ALLOC_CONF from the environment still wins.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import sys
 import torch
 import torch.nn as nn
@@ -22,7 +29,7 @@ if __name__ != "__main__":
 d_model = 512
 d_hid = 4 * d_model
 max_len = 600
-batch_size = 32
+batch_size = 128
 n_head = 8
 d_head = d_model // n_head
 n_stack = 6
@@ -171,44 +178,41 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1)]
 
 
-class AttentionHead(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.q_wei = nn.Linear(d_model, d_head, bias=False)
-        self.k_wei = nn.Linear(d_model, d_head, bias=False)
-        self.v_wei = nn.Linear(d_model, d_head, bias=False)
-        mask_len = max_len + 1 # Accounts for adding bos / eos
-        self.register_buffer('causal_mask', torch.tril(torch.ones(mask_len, mask_len)) == 0)
-
-    def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
-        q = self.q_wei(q_x)
-        k = self.k_wei(kv_x)
-        v = self.v_wei(kv_x)
-
-        out = (q @ k.transpose(-1, -2))/d_head**0.5
-        out = out.masked_fill(pad_mask, float('-inf'))
-        if apply_causal_mask:
-            q_len = q_x.shape[1]
-            k_len = kv_x.shape[1]
-            out = out.masked_fill(self.causal_mask[:q_len,:k_len], float('-inf'))
-        out = F.softmax(out, dim=-1)
-        out = out @ v
-
-        return out
-
-
 class MultiHeadAttention(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.heads = nn.ModuleList(AttentionHead() for i in range(n_head)) # Can likely optimise by running in parallel as a single big matrix
+        # All heads fused into single projections (d_model -> n_head * d_head == d_model).
+        # Same parameter count as one bias-free Linear per head, but a single matmul.
+        self.q_wei = nn.Linear(d_model, d_model, bias=False)
+        self.k_wei = nn.Linear(d_model, d_model, bias=False)
+        self.v_wei = nn.Linear(d_model, d_model, bias=False)
         self.linear = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(p_dropout)
+        mask_len = max_len + 1 # Accounts for adding bos / eos
+        self.register_buffer('causal_mask', torch.tril(torch.ones(mask_len, mask_len)) == 0)
 
     def forward(self, q_x, kv_x, pad_mask, apply_causal_mask=False):
-        out = [head(q_x, kv_x, pad_mask, apply_causal_mask) for head in self.heads]
-        out = torch.cat(out, dim=-1)
+        B, T_q, _ = q_x.shape
+        T_kv = kv_x.shape[1]
+
+        # Project then split into heads: (B, n_head, T, d_head)
+        q = self.q_wei(q_x).view(B, T_q, n_head, d_head).transpose(1, 2)
+        k = self.k_wei(kv_x).view(B, T_kv, n_head, d_head).transpose(1, 2)
+        v = self.v_wei(kv_x).view(B, T_kv, n_head, d_head).transpose(1, 2)
+
+        # Build an additive mask (-inf where masked) broadcastable to (B, n_head, T_q, T_kv).
+        # pad_mask is (B, 1, T_kv); add a head dim so it broadcasts over heads and queries.
+        mask = pad_mask.unsqueeze(1)                          # (B, 1, 1, T_kv)
+        if apply_causal_mask:
+            mask = mask | self.causal_mask[:T_q, :T_kv]       # broadcast (T_q, T_kv)
+        attn_mask = torch.zeros_like(mask, dtype=q.dtype).masked_fill(mask, float('-inf'))
+
+        # scaled_dot_product_attention applies the 1/sqrt(d_head) scaling internally and
+        # uses a memory-efficient kernel that never materialises the full T_q x T_kv matrix.
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = out.transpose(1, 2).reshape(B, T_q, d_model)    # re-merge heads
+
         out = self.linear(out)
         out = self.dropout(out)
         return out
