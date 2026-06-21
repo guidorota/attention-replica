@@ -360,8 +360,11 @@ def estimate_bleu(n_sentences=512):
     # Walk the length-bucketed eval set to minimise padding, like generate_batch
     # Not reusing generate_batch to ensure that sentences don't overlap between batches,
     # and to ensure we're using the same sample every time (reproducibility).
+    n_sentences = min(n_sentences, len(en_eval_sorted_idx))
+    stride = len(en_eval_sorted_idx) / n_sentences
+    sample_idx = [en_eval_sorted_idx[int(i * stride)] for i in range(n_sentences)]
     for start in range(0, min(n_sentences, len(it_eval)), batch_size):
-        idxs = en_eval_sorted_idx[start:start + batch_size]
+        idxs = sample_idx[start:start + batch_size]
         src_x = pad([torch.tensor(it_eval[i]) for i in idxs]).to(device)
 
         out = generate(src_x)
@@ -369,7 +372,7 @@ def estimate_bleu(n_sentences=512):
         refs.extend(decode(en_eval[i]) for i in idxs)
 
     # Emit some translated strings to visually debug how the model is doing
-    for h, r in zip(hyps[:5], refs[:5]):
+    for h, r in zip(hyps, refs):
         print(f'  HYP: {h!r}\n  REF: {r!r}\n')
     bleu = sacrebleu.corpus_bleu(hyps, [refs])
     return bleu.score
