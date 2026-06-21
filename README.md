@@ -33,6 +33,11 @@ Performance (nice to have):
 * Other observations from the very first training run:
   * Loss is decreasing but doesn't seem to be converging very well (4.9994 -> 2.0221 -> 2.406 -> 2.1195 -> 2.3028 ...), need to investigate on this
   * BLEU is still at zero even after a 25K training iterations, need to emit some stats to manually sample the quality of the translations
+* BLEU was calculated only using the shortest 64 strings, changing selection algorithm to still be deterministic, but sample across all lengths in the eval set
+* Looked at a few more translations from ~20K training cycles: the results are always the same regardless of the src input string, which shows there's either a problem with my model or with my training setup. Results from sparring with claude:
+  * Main culprits appears to be char level tokenization instead of wordpiece and significantly smaller dataset. Trying claude's suggestions:
+    * move from post-ln to pre-ln (see "On Layer Normalization in the Transformer Architecture", also pre-ln is what karpathy uses in his lessons)
+    * gradient clipping to ensure that a gradient spike can't influence the network too much
 
 ## Notes
 
