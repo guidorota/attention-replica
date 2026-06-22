@@ -35,14 +35,15 @@ gen_batch_size = 128 # Max generated batch size
 n_head = 8
 d_head = d_model // n_head; assert d_model % n_head == 0
 n_stack = 6
-p_dropout = 0.1
+p_dropout = 0.3
 
 dataset_name = "Helsinki-NLP/opus-100"
 target_vocab_size = 16000
 tokenizer_path = f"tokenizer-{dataset_name.split('/')[-1]}-{target_vocab_size}.json"
 
 training_steps = 100_000
-warmup_steps = 4_000
+warmup_steps = 1_000
+peak_lr = 7e-4
 
 eval_interval = 5_000
 eval_iters = 50
@@ -397,10 +398,23 @@ n_params = sum(p.numel() for p in ps)
 print(f'number of parameters: {n_params/1e6:.2f}M')
 
 def lr_lambda(step):
-    step = max(step, 1)
-    return d_model**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
+    if step < warmup_steps:
+        return step / warmup_steps
+    progress = (step - warmup_steps) / (training_steps - warmup_steps)
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-optimizer = torch.optim.AdamW(m.parameters(), lr=1.0, betas=(0.9, 0.98))
+# Exclude biases and 1-D params (LayerNorm) from weight decay
+decay, no_decay = [], []
+for _n, p in m.named_parameters():
+    if not p.requires_grad:
+        continue
+    (no_decay if p.ndim < 2 else decay).append(p)
+
+optimizer = torch.optim.AdamW(
+    [{'params': decay, 'weight_decay': 0.1},
+     {'params': no_decay, 'weight_decay': 0.0}],
+    lr=peak_lr, betas=(0.9, 0.98),
+)
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def calculate_loss(logits, expected):
@@ -500,9 +514,9 @@ def translate_eval(n_sentences):
         srcs.extend(decode(it_eval[i]) for i in idxs)
     return hyps, refs, srcs
 
-def write_samples(f, hyps, refs, srcs, max_print):
+def write_samples(f, hyps, refs, srcs):
     # Translations are written to a log file only, never printed to the screen.
-    for h, r, s in list(zip(hyps, refs, srcs))[:max_print]:
+    for h, r, s in zip(hyps, refs, srcs):
         f.write(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {s!r}\n\n')
     f.flush()
 
@@ -564,7 +578,7 @@ for iter in range(training_steps):
 
         # Translations to the full log only (kept off the screen).
         full_file.write(f"=== step {iter} samples ===\n")
-        write_samples(full_file, hyps, refs, srcs, max_print=5)
+        write_samples(full_file, hyps, refs, srcs)
 
         eval_loss_steps.append(iter)
         eval_loss_hist.append(losses['eval'])
@@ -615,7 +629,7 @@ log('final bleu on the full eval set')
 t = now()
 hyps, refs, srcs = translate_eval(len(eval_sorted_idx))
 full_file.write("=== final full-eval samples ===\n")
-write_samples(full_file, hyps, refs, srcs, max_print=10)
+write_samples(full_file, hyps, refs, srcs)
 score, lo, hi = bootstrap_bleu_ci(hyps, refs)
 log(f"final BLEU (full eval, {len(hyps)} sentences): {score:.2f} "
     f"95% CI [{lo:.2f}, {hi:.2f}] (±{(hi - lo) / 2:.2f}) in {now()-t:.0f}s")

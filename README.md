@@ -19,6 +19,9 @@ Additional changes
 * Full 100K run on batches capped by token count instead of sentence count. Best one so far, final BLEU is 16.45
   * BLEU is fluctuating a lot when training, not sure if it's real or if it's due to the small sample size
   * Next up, need to print more meaningful stats (likely better BLEU at every 5K) to determine
+* Good run (training/20260622-130601/), BLEU peaked at 15.75 at 35K, but then we started seeing signs of overfitting (training loss decreasing, but BLEU oscillating and becoming slightly worse). Stopped at 50K, making the following changes:
+  * Dropout 0.1 -> 0.3
+  * 0.1 weight decay on parameters with 2 or more dimensions, 0 otherwise
 
 ### 2026-06-21
 
