@@ -1,6 +1,6 @@
 # Attention Replica
 
-An encoder / decoder transformer for that can be trained to translate text.
+An encoder / decoder transformer for that can be trained to translate text. BLEU for it -> en trained on the dataset `Helsinki-NLP/opus-100` is 32.84 @ 95% CI [31.52, 34.32] (±1.40).
 
 Based on the transformer architecture in [Attention Is All You Need](https://arxiv.org/abs/1706.03762), with some more modern modifications:
 * Pre-LN instead of Post-LN
@@ -19,6 +19,10 @@ Based on the transformer architecture in [Attention Is All You Need](https://arx
 * Good run (training/20260622-130601/), BLEU peaked at 15.75 at 35K, but then we started seeing signs of overfitting (training loss decreasing, but BLEU oscillating and becoming slightly worse). Stopped at 50K, making the following changes:
   * Dropout 0.1 -> 0.3
   * 0.1 weight decay on parameters with 2 or more dimensions, 0 otherwise
+* training/20260622-174040 is the best run so far, achieving 32.84 @ 95% CI [31.52, 34.32] (±1.40). Signs of overfitting after 65K steps (train loss decreasing, eval loss and BLEU practically stable, only oscillating in the noise). I will likely call it and move to other projects, but for future reference these are the things that I would try next:
+  * Change dataset for a larger one
+  * Experiment with different dropout / label smoothing / weight decay
+  * Beam search instead of greedy
 
 ### 2026-06-21
 
