@@ -301,7 +301,7 @@ class EncoderStack(nn.Module):
         self.ln2 = nn.LayerNorm(d_model)
 
     def forward(self, x, pad_mask):
-        # Pre-LN: normalise the input to each sublayer, keep the residual stream clean.
+        # Pre-LN
         normed = self.ln1(x)
         out = x + self.attn(normed, normed, pad_mask)
         out = out + self.ffw(self.ln2(out))
@@ -320,7 +320,7 @@ class DecoderStack(nn.Module):
         self.ln3 = nn.LayerNorm(d_model)
 
     def forward(self, trs_x, pad_mask_trs_x, src_out, pad_mask_src_x):
-        # Pre-LN: normalise each sublayer's input. src_out is the encoder memory,
+        # Pre-LN: src_out is the encoder memory,
         # already normalised by the encoder's final LN, so it's used as-is for cross-attn k/v.
         normed = self.ln1(trs_x)
         out = trs_x + self.attn(normed, normed, pad_mask_trs_x, apply_causal_mask=True)

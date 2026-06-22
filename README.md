@@ -6,13 +6,11 @@ Performance (nice to have):
 
 * bf16 autocast (see notes further down)
 * torch.compile - `m = torch.compile(m, dynamic=True)`
-* ~~Split encoding and decoding so that we don't run the encoding stack for every character of the output translation~~ (done: `generate()` encodes once, then decodes incrementally with per-layer K/V caches — self-attn K/V grow per step, cross-attn K/V computed once from the encoder memory. Verified numerically identical to the full forward, ~7x faster at 80 steps)
 
 Additional changes
 
-* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely.
+* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely. Worth starting from removing gradient clipping first to isolate its contribution.
 * Use multinomial to add some variation to the translations
-* Train on a larger dataset
 
 ## Diary
 
