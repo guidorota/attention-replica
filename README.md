@@ -1,16 +1,13 @@
 # Attention Replica
 
-## TODO
+An encoder / decoder transformer for that can be trained to translate text.
 
-Performance (nice to have):
-
-* bf16 autocast (see notes further down)
-* torch.compile - `m = torch.compile(m, dynamic=True)`
-
-Additional changes
-
-* Try reverting to post-LN and removing gradient clipping to see if char-level tokenization was really what caused the model to ignore the src input completely. Worth starting from removing gradient clipping first to isolate its contribution.
-* Use multinomial to add some variation to the translations
+Based on the transformer architecture in [Attention Is All You Need](https://arxiv.org/abs/1706.03762), with some more modern modifications:
+* Pre-LN instead of Post-LN
+* 0.3 dropout instead of 0.1
+* AdamW optimizer instead of Adam, 0.1 weight decay (except for 1-dimension params which get 0 decay)
+* Shortened warmup, cosine learning rate decay instead of Noam
+* Gradient clipping
 
 ## Diary
 
