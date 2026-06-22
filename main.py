@@ -17,11 +17,15 @@ from tokenizers.models import WordPiece
 from tokenizers.trainers import WordPieceTrainer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.decoders import WordPiece as WordPieceDecoder
+import matplotlib
+matplotlib.use('Agg')  # headless
+import matplotlib.pyplot as plt
 
 # Invocation guard
 if __name__ != "__main__":
     sys.exit(-1)
 
+#################
 # Hyperparameters
 d_model = 512
 d_hid = 4 * d_model
@@ -29,7 +33,7 @@ max_len = 600
 max_tokens = 25000
 gen_batch_size = 128 # Max generated batch size
 n_head = 8
-d_head = d_model // n_head
+d_head = d_model // n_head; assert d_model % n_head == 0
 n_stack = 6
 p_dropout = 0.1
 
@@ -42,9 +46,12 @@ warmup_steps = 4_000
 
 eval_interval = 5_000
 eval_iters = 50
-
-assert d_model % n_head == 0
+eval_bleu_sentences = 256
 # ---------------
+
+###################
+# Setup environment
+load_dotenv()
 
 def detect_device() -> str:
     if torch.cuda.is_available():
@@ -53,8 +60,6 @@ def detect_device() -> str:
         return 'mps'
     else:
         return 'cpu'
-
-load_dotenv()
 
 device = detect_device()
 print(f'device: {device}')
@@ -404,17 +409,32 @@ def calculate_loss(logits, expected):
     return loss
 
 @torch.no_grad()
+def _avg_loss(batches, it_data, en_data):
+    # Token-weighted mean cross-entropy over the given batches (sum of per-token
+    # loss / number of non-pad target tokens), so batches of different sizes are
+    # weighted by their real token count rather than counted equally.
+    total_loss, total_tokens = 0.0, 0
+    for idxs in batches:
+        it_x, en_x, en_y = collate(idxs, it_data, en_data)
+        logits = m(it_x, en_x)
+        B, T, E = logits.shape
+        total_loss += F.cross_entropy(logits.view(B*T, E), en_y.view(B*T),
+                                      ignore_index=pad_token_idx, label_smoothing=0.1,
+                                      reduction='sum').item()
+        total_tokens += (en_y != pad_token_idx).sum().item()
+    return total_loss / total_tokens
+
+@torch.no_grad()
 def estimate_loss():
-    out = {}
     m.eval()
-    for split in ['train', 'eval']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            it_x, en_x, en_y = generate_batch(split)
-            logits = m(it_x, en_x)
-            loss = calculate_loss(logits, en_y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
+    # Eval: deterministic full pass over the whole eval set (exact, and cheap
+    # since it's only a few batches). Train: a random sample, since the full
+    # train set is far too large to sweep every eval.
+    train_sample = [random.choice(train_batches) for _ in range(eval_iters)]
+    out = {
+        'train': _avg_loss(train_sample, it_train, en_train),
+        'eval': _avg_loss(eval_batches, it_eval, en_eval),
+    }
     m.train()
     return out
 
@@ -461,15 +481,16 @@ def ids_to_text(ids):
     return tokenizer.decode(ids)
 
 @torch.no_grad()
-def estimate_bleu(n_sentences=512, max_print=None):
+def translate_eval(n_sentences):
+    # Translate a deterministic, length-spread sample of the eval set and return
+    # (hyps, refs, srcs). Walks the length-sorted order so batches stay tightly
+    # padded; the deterministic stride keeps the sample fixed across evals
+    # (reproducibility). n_sentences >= len(eval) translates the whole set.
     hyps, refs, srcs = [], [], []
-    # Walk the length-bucketed eval set to minimise padding, like generate_batch
-    # Not reusing generate_batch to ensure that sentences don't overlap between batches,
-    # and ensures we're using the same samples every time (reproducibility).
     n_sentences = min(n_sentences, len(eval_sorted_idx))
     stride = len(eval_sorted_idx) / n_sentences
     sample_idx = [eval_sorted_idx[int(i * stride)] for i in range(n_sentences)]
-    for start in range(0, min(n_sentences, len(it_eval)), gen_batch_size):
+    for start in range(0, n_sentences, gen_batch_size):
         idxs = sample_idx[start:start + gen_batch_size]
         src_x = pad([torch.tensor(it_eval[i]) for i in idxs]).to(device)
 
@@ -477,21 +498,57 @@ def estimate_bleu(n_sentences=512, max_print=None):
         hyps.extend(ids_to_text(row) for row in out)
         refs.extend(decode(en_eval[i]) for i in idxs)
         srcs.extend(decode(it_eval[i]) for i in idxs)
+    return hyps, refs, srcs
 
-    samples = list(zip(hyps, refs, srcs))
-    if max_print is not None:
-        samples = samples[:max_print]
-    for h, r, s in samples:
-        print(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {s!r}\n')
-    bleu = sacrebleu.corpus_bleu(hyps, [refs])
-    return bleu.score
+def write_samples(f, hyps, refs, srcs, max_print):
+    # Translations are written to a log file only, never printed to the screen.
+    for h, r, s in list(zip(hyps, refs, srcs))[:max_print]:
+        f.write(f'  HYP: {h!r}\n  REF: {r!r}\n  SRC: {s!r}\n\n')
+    f.flush()
+
+def bootstrap_bleu_ci(hyps, refs, n_boot=1000, level=0.95, seed=12345):
+    # 95% confidence interval via bootstrap resampling of sentence pairs:
+    # corpus_bleu is cheap (just n-gram counting), so we resample with
+    # replacement many times and take percentiles of the resulting scores.
+    score = sacrebleu.corpus_bleu(hyps, [refs]).score
+    rng = random.Random(seed)
+    n = len(hyps)
+    scores = []
+    for _ in range(n_boot):
+        idx = [rng.randrange(n) for _ in range(n)]
+        scores.append(sacrebleu.corpus_bleu([hyps[i] for i in idx],
+                                            [[refs[i] for i in idx]]).score)
+    scores.sort()
+    lo = scores[int((1 - level) / 2 * n_boot)]
+    hi = scores[int((1 + level) / 2 * n_boot)]
+    return score, lo, hi
 
 def now():
     if device == 'cuda':
         torch.cuda.synchronize()
     return time.perf_counter()
 
-print('training')
+# ---- Per-run output folder: stats log, full log (+ samples), loss plot, checkpoints ----
+run_dir = f"training-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+os.makedirs(run_dir, exist_ok=True)
+stats_file = open(os.path.join(run_dir, 'stats.log'), 'w')   # stats only (mirrors the screen)
+full_file = open(os.path.join(run_dir, 'full.log'), 'w')     # stats + hyp/ref/src samples
+
+def log(msg):
+    # Stats lines go to the screen AND both log files; samples go to full_file only.
+    print(msg)
+    for f in (stats_file, full_file):
+        f.write(msg + '\n')
+        f.flush()
+
+# Loss history for the plot: train loss every loss_record_interval steps, eval loss per eval.
+loss_record_interval = 100
+train_loss_steps, train_loss_hist = [], []
+eval_loss_steps, eval_loss_hist = [], []
+best_bleu, best_loss = float('-inf'), float('inf')
+
+log(f'logging this run to {run_dir}/')
+log('training')
 m.train()
 total_start = now()
 train_start = now()
@@ -499,17 +556,38 @@ for iter in range(training_steps):
     if iter % eval_interval == 0:
         train_elapsed = now() - train_start
 
-        t = now(); losses = estimate_loss();             loss_elapsed = now() - t
-        t = now(); bleu = estimate_bleu(n_sentences=64); bleu_elapsed = now() - t
+        t = now(); losses = estimate_loss(); loss_elapsed = now() - t
+        t = now()
+        hyps, refs, srcs = translate_eval(eval_bleu_sentences)
+        bleu = sacrebleu.corpus_bleu(hyps, [refs]).score
+        bleu_elapsed = now() - t
 
-        print(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}, BLEU {bleu:.2f}")
+        # Translations to the full log only (kept off the screen).
+        full_file.write(f"=== step {iter} samples ===\n")
+        write_samples(full_file, hyps, refs, srcs, max_print=5)
+
+        eval_loss_steps.append(iter)
+        eval_loss_hist.append(losses['eval'])
+
+        log(f"step {iter}: train loss {losses['train']:.4f}, eval loss {losses['eval']:.4f}, BLEU {bleu:.2f}")
         if iter == 0:
-            print(f"  timing: loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | total {now()-total_start:.0f}s")
+            log(f"  timing: loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | total {now()-total_start:.0f}s")
         else:
-            print(f"  timing: {eval_interval} train steps {train_elapsed:.1f}s "
-                  f"({train_elapsed/eval_interval*1000:.0f}ms/step) | "
-                  f"loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | "
-                  f"total {now()-total_start:.0f}s")
+            log(f"  timing: {eval_interval} train steps {train_elapsed:.1f}s "
+                f"({train_elapsed/eval_interval*1000:.0f}ms/step) | "
+                f"loss {loss_elapsed:.1f}s | bleu {bleu_elapsed:.1f}s | "
+                f"total {now()-total_start:.0f}s")
+
+        # Best-eval checkpoints: BLEU and loss tracked independently (BLEU is the
+        # task metric but noisy; eval loss is the more stable signal).
+        if bleu > best_bleu:
+            best_bleu = bleu
+            torch.save(m.state_dict(), os.path.join(run_dir, 'best-bleu.pt'))
+            log(f"  new best BLEU {bleu:.2f} -> saved best-bleu.pt")
+        if losses['eval'] < best_loss:
+            best_loss = losses['eval']
+            torch.save(m.state_dict(), os.path.join(run_dir, 'best-loss.pt'))
+            log(f"  new best eval loss {losses['eval']:.4f} -> saved best-loss.pt")
 
         train_start = now()
 
@@ -523,19 +601,40 @@ for iter in range(training_steps):
     scheduler.step()
     optimizer.zero_grad(set_to_none=True)
 
+    if iter % loss_record_interval == 0:
+        train_loss_steps.append(iter)
+        train_loss_hist.append(loss.item())
+
 total_elapsed = now() - total_start
-print(f"training complete: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min) over {training_steps} steps")
+log(f"training complete: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min) over {training_steps} steps")
 
-print('final bleu on 512 sentences')
+# Decision-quality BLEU: translate the WHOLE eval set once, then report the
+# score with a bootstrap 95% confidence interval (a trustworthy number, unlike
+# the small periodic samples used for the training-time trend).
+log('final bleu on the full eval set')
 t = now()
-final_bleu = estimate_bleu(n_sentences=512, max_print=10)
-print(f"final BLEU (512 sentences): {final_bleu:.2f} in {now()-t:.0f}s")
+hyps, refs, srcs = translate_eval(len(eval_sorted_idx))
+full_file.write("=== final full-eval samples ===\n")
+write_samples(full_file, hyps, refs, srcs, max_print=10)
+score, lo, hi = bootstrap_bleu_ci(hyps, refs)
+log(f"final BLEU (full eval, {len(hyps)} sentences): {score:.2f} "
+    f"95% CI [{lo:.2f}, {hi:.2f}] (±{(hi - lo) / 2:.2f}) in {now()-t:.0f}s")
 
-##############
-# Save weights
-timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-ckpt_path = f'attention-replica-{timestamp}.pt'
-torch.save(m.state_dict(), ckpt_path)
-print(f'saved weights to {ckpt_path}')
+# ---- Training-loss plot ----
+plt.figure(figsize=(9, 5))
+plt.plot(train_loss_steps, train_loss_hist, linewidth=0.7, label=f'train loss (every {loss_record_interval} steps)')
+plt.plot(eval_loss_steps, eval_loss_hist, marker='o', label='eval loss')
+plt.xlabel('step'); plt.ylabel('loss'); plt.title('Training loss')
+plt.legend(); plt.grid(True, alpha=0.3)
+plt.savefig(os.path.join(run_dir, 'loss.png'), dpi=120, bbox_inches='tight')
+log(f'saved loss plot to {os.path.join(run_dir, "loss.png")}')
+
+# ---- Final weights ----
+torch.save(m.state_dict(), os.path.join(run_dir, 'final.pt'))
+log(f'saved final weights to {os.path.join(run_dir, "final.pt")}')
+
+stats_file.close()
+full_file.close()
+sys.exit(0)
 
 sys.exit(0)
