@@ -529,7 +529,7 @@ def now():
     return time.perf_counter()
 
 # ---- Per-run output folder: stats log, full log (+ samples), loss plot, checkpoints ----
-run_dir = f"training-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+run_dir = os.path.join('training', datetime.now().strftime('%Y%m%d-%H%M%S'))
 os.makedirs(run_dir, exist_ok=True)
 stats_file = open(os.path.join(run_dir, 'stats.log'), 'w')   # stats only (mirrors the screen)
 full_file = open(os.path.join(run_dir, 'full.log'), 'w')     # stats + hyp/ref/src samples
