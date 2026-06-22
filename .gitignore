@@ -3,3 +3,5 @@
 tokenizer*.json
 *.pt
 training/
+__pycache__/
+*.pyc
