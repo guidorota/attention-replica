@@ -2,14 +2,45 @@
 
 An encoder / decoder transformer for that can be trained to translate text. BLEU for it -> en trained on the dataset `Helsinki-NLP/opus-100` is 32.84 @ 95% CI [31.52, 34.32] (±1.40).
 
-Based on the transformer architecture in [Attention Is All You Need](https://arxiv.org/abs/1706.03762), with some more modern modifications:
+Based on the transformer architecture in [Attention Is All You Need](https://arxiv.org/abs/1706.03762), with some modifications to modernize it:
 * Pre-LN instead of Post-LN
 * 0.3 dropout instead of 0.1
 * AdamW optimizer instead of Adam, 0.1 weight decay (except for 1-dimension params which get 0 decay)
 * Shortened warmup, cosine learning rate decay instead of Noam
 * Gradient clipping
 
+## Usage
+
+All scripts run via `uv run <script.py>`.
+
+### Entrypoints
+
+```bash
+# One-time: build the WordPiece tokenizer JSON from the corpus
+uv run build_tokenizer.py
+
+# Train a model (writes to training/<timestamp>/: checkpoints, logs, loss.png)
+uv run train.py
+
+# Translate a string with a checkpoint (Italian -> English). No dataset needed.
+uv run generate.py <checkpoint.pt> "Buongiorno, come stai oggi?"
+uv run generate.py <checkpoint.pt> --beam 4 "Testo da tradurre"
+echo "Testo da tradurre" | uv run python generate.py <checkpoint.pt>   # via stdin
+
+# Score a checkpoint with BLEU + bootstrap 95% CI on a split
+uv run eval.py <checkpoint.pt>                          # validation, beam=4
+uv run eval.py <checkpoint.pt> --split test --beam 1    # test set, greedy
+uv run eval.py <checkpoint.pt> --split validation -n 64 # quick 64-sentence sample
+```
+
 ## Diary
+
+### 2026-06-23
+
+* Implemented beam search, can see a slight improvement in the final scores:
+  * 4 beams BLEU: 33.53 95% CI [32.18, 34.93] (±1.37)
+  * Greedy BLEU: 32.88 95% CI [31.53, 34.28] (±1.37)
+* Now the only gap compared to the original paper is checkpoint averaging
 
 ### 2026-06-22
 
