@@ -1,6 +1,6 @@
 # Attention Replica
 
-An encoder / decoder transformer for that can be trained to translate text. BLEU for it -> en trained on the dataset `Helsinki-NLP/opus-100` is 32.84 @ 95% CI [31.52, 34.32] (±1.40).
+An encoder / decoder transformer trained from scratch for Italian -> English translation.
 
 Based on the transformer architecture in [Attention Is All You Need](https://arxiv.org/abs/1706.03762), with some modifications to modernize it:
 * Pre-LN instead of Post-LN
@@ -8,6 +8,19 @@ Based on the transformer architecture in [Attention Is All You Need](https://arx
 * AdamW optimizer instead of Adam, 0.1 weight decay (except for 1-dimension params which get 0 decay)
 * Shortened warmup, cosine learning rate decay instead of Noam
 * Gradient clipping
+
+## Results and progression
+
+**Result: 33.53 95% CI [32.18, 34.93] (±1.37)** with beam search of width 4 on `Helsinki-NLP/opus-100` IT -> EN (Original paper obtained BLEU 27.3 on WMT 2014 EN -> DE).
+
+| Configuration | BLEU | Notes |
+|---|---|---|
+| First run with char tokenizer | ~0 | Output collapse, encoder output ignored |
+| Pre-LN, gradient clipping | Diagnostic run | Training correctly, but overfitting hard, run interrupted |
+| Char -> WordPiece tokenizer | Diagnostic run | Significant increase in BLEU compared to char tokens, run interrupted |
+| Parallel Multi-head attention, bigger dataset (Helsinki-NLP/opus-100), batch on token count | 16.45 | Training foundation established, however overfitting visible |
+| Dropout 0.1 -> 0.3, introduce weight decay | 32.88 ±1.37 | Reached first goal of passing 30 BLEU (threshold based on literature for IT -> EN) |
+| Beam search (width 5) | 33.53 ±1.37 | Evaluated on the best BLEU checkpoint of the previous run |
 
 ## Usage
 
@@ -50,7 +63,7 @@ uv run eval.py <checkpoint.pt> --split validation -n 64 # quick 64-sentence samp
 * Good run (training/20260622-130601/), BLEU peaked at 15.75 at 35K, but then we started seeing signs of overfitting (training loss decreasing, but BLEU oscillating and becoming slightly worse). Stopped at 50K, making the following changes:
   * Dropout 0.1 -> 0.3
   * 0.1 weight decay on parameters with 2 or more dimensions, 0 otherwise
-* training/20260622-174040 is the best run so far, achieving 32.84 @ 95% CI [31.52, 34.32] (±1.40). Signs of overfitting after 65K steps (train loss decreasing, eval loss and BLEU practically stable, only oscillating in the noise). I will likely call it and move to other projects, but for future reference these are the things that I would try next:
+* training/20260622-174040 is the best run so far, achieving 32.84 @ 95% CI [31.52, 34.32] (±1.40) on the latest checkpoint, 32.88 95% CI [31.53, 34.28] (±1.37) on best BLEU checkpoint. Signs of overfitting after 65K steps (train loss decreasing, eval loss and BLEU practically stable, only oscillating in the noise). I will likely call it and move to other projects, but for future reference these are the things that I would try next:
   * Change dataset for a larger one
   * Experiment with different dropout / label smoothing / weight decay
   * Beam search instead of greedy
@@ -75,7 +88,7 @@ uv run eval.py <checkpoint.pt> --split validation -n 64 # quick 64-sentence samp
 * Multi-head attention parallelization done
 * Switched to Helsinki-NLP/opus-100, seeing BLEU 4.27 @ 10K steps, final bleu 13.45 (100K training steps). Best run so far. Next I want to try batching by token count
 
-## Notes
+## Working notes (outdatad, historical context only)
 
 * Training inputs
   * Full source string given to model at training time
