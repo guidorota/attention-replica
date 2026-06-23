@@ -70,7 +70,7 @@ uv run eval.py <checkpoint.pt> --split validation -n 64 # quick 64-sentence samp
 
 ### 2026-06-21
 
-* First training run on an NVIDIA GPU. A few learnings on the current code structure:
+* First training run on an NVIDIA 4090 GPU. A few learnings on the current code structure:
   * `torch.compile` is way slower than expected, removing it temporarily to run a few training runs and find potential issues
   * BLEU stats take a long time to run, increasing eval_interval (1_000 -> 5_000), and reducing n_sentence (512 -> 64)
   * Running out of memory with batches of 64 sentences, reducing to 32 (arguably I should have run a training run with the longest sentences only to exclude OOMs mid-training)
