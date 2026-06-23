@@ -31,7 +31,7 @@ d_model = 512
 d_hid = 4 * d_model
 max_len = 600
 max_tokens = 25000
-gen_batch_size = 128 # Max generated batch size
+gen_batch_size = 128 # Max generated batch size (source sentences; beam multiplies the rows)
 n_head = 8
 d_head = d_model // n_head; assert d_model % n_head == 0
 n_stack = 6
@@ -48,6 +48,9 @@ peak_lr = 7e-4
 eval_interval = 5_000
 eval_iters = 50
 n_eval_bleu = 256
+
+beam_size = 4
+beam_length_penalty = 0.6
 # ---------------
 
 ###################
@@ -476,6 +479,93 @@ def generate(src_x, max_new_tokens=max_len + 1):
         m.train()
     return trs
 
+def reorder_caches(caches, index):
+    # Beam search reorders the surviving hypotheses every step, so the per-layer
+    # K/V caches (batch is dim 0) must follow their parent beams to stay aligned
+    # with the sequences. Cross-attn K/V is constant per source but lives in the
+    # same cache, so it gets reordered identically (harmless).
+    for layer in caches:
+        for attn in ('self', 'cross'):
+            for kv in ('k', 'v'):
+                t = layer[attn][kv]
+                if t is not None:
+                    layer[attn][kv] = t.index_select(0, index)
+
+@torch.no_grad()
+def generate_beam(src_x, beam=beam_size, alpha=beam_length_penalty, max_new_tokens=max_len + 1):
+    was_training = m.training
+    m.eval()
+
+    B = src_x.shape[0]
+    src_x = src_x.to(device)
+
+    pad_mask_src = (src_x == pad_token_idx).unsqueeze(-2)
+    memory = m.encode(src_x, pad_mask_src)
+
+    N = B * beam
+    # Give every beam its own copy of the encoder outputs
+    memory = memory.repeat_interleave(beam, dim=0)
+    pad_mask_src = pad_mask_src.repeat_interleave(beam, dim=0)
+
+    caches = [{'self': {'k': None, 'v': None}, 'cross': {'k': None, 'v': None}}
+              for _ in range(n_stack)]
+
+    seqs = torch.full((N, 1), bos_token_idx, dtype=torch.long, device=device)
+    # Per-beam cumulative log-prob. Seed only beam 0 of each source as "live" so
+    # the first step doesn't expand `beam` identical <bos> rows into duplicates.
+    beam_scores = torch.full((B, beam), float('-inf'), device=device)
+    beam_scores[:, 0] = 0.0
+
+    finished = [[] for _ in range(B)]   # (length_penalised_score, ids) per source
+    base = (torch.arange(B, device=device) * beam).unsqueeze(1)  # (B,1) row offsets
+
+    for _ in range(max_new_tokens):
+        pos = seqs.shape[1] - 1
+        logits = m.decode_step(seqs[:, -1:], pos, memory, pad_mask_src, caches)  # (N, V)
+        logp = F.log_softmax(logits, dim=-1)
+        V = logp.shape[-1]
+
+        # Score every (beam, token) continuation, then keep the best `beam` per source.
+        cand = (beam_scores.view(N, 1) + logp).view(B, beam * V)   # (B, beam*V)
+        # topk returns scores and indexes in decreasing order of value. That, combined with
+        # the fact that the same parent can appear multiple times in the topk is what makes
+        # reordering of the caches necessary.
+        top_scores, top_idx = cand.topk(beam, dim=-1)              # (B, beam)
+        parent = top_idx // V                                      # (B, beam) in [0, beam)
+        next_tok = top_idx % V                                     # (B, beam)
+
+        abs_parent = (base + parent).view(-1)                      # (N,) into [0, N)
+        reorder_caches(caches, abs_parent)
+        seqs = torch.cat([seqs[abs_parent], next_tok.view(-1, 1)], dim=1)
+        beam_scores = top_scores
+
+        gen_len = seqs.shape[1] - 1   # nr. of tokens generated after <bos>
+        # Retire any beam that just emitted <eos> and park its slot at -inf so it
+        # is never extended or re-selected.
+        eos_mask = next_tok == eos_token_idx
+        if eos_mask.any():
+            for b, k in eos_mask.nonzero(as_tuple=False).tolist():
+                if beam_scores[b, k].item() == float('-inf'):
+                    continue
+                lp = beam_scores[b, k].item() / (gen_len ** alpha)
+                finished[b].append((lp, seqs[b * beam + k].clone()))
+                beam_scores[b, k] = float('-inf')
+
+        if all(len(f) >= beam for f in finished):
+            break
+
+    # Select the best beam (synthesize a score if no beam has finished for a particular input)
+    out = []
+    final_len = seqs.shape[1] - 1
+    for b in range(B):
+        pool = finished[b] or [(beam_scores[b, k].item() / (final_len ** alpha),
+                                seqs[b * beam + k]) for k in range(beam)]
+        out.append(max(pool, key=lambda x: x[0])[1])
+
+    if was_training:
+        m.train()
+    return out
+
 def ids_to_text(ids):
     ids = [int(i) for i in ids]
     # Cut at the first <eos> so we don't decode trailing padding
@@ -484,7 +574,7 @@ def ids_to_text(ids):
     return tokenizer.decode(ids)
 
 @torch.no_grad()
-def translate_eval(n_sentences):
+def translate_eval(n_sentences, beam=1):
     hyps, refs, srcs = [], [], []
     n_sentences = min(n_sentences, len(eval_sorted_idx))
     stride = len(eval_sorted_idx) / n_sentences
@@ -493,7 +583,7 @@ def translate_eval(n_sentences):
         idxs = sample_idx[start:start + gen_batch_size]
         src_x = pad([torch.tensor(it_eval[i]) for i in idxs]).to(device)
 
-        out = generate(src_x)
+        out = generate(src_x) if beam == 1 else generate_beam(src_x, beam=beam)
         hyps.extend(ids_to_text(row) for row in out)
         refs.extend(decode(en_eval[i]) for i in idxs)
         srcs.extend(decode(it_eval[i]) for i in idxs)
@@ -598,9 +688,9 @@ for iter in range(training_steps):
 total_elapsed = now() - total_start
 log(f"training complete: {total_elapsed:.0f}s ({total_elapsed/60:.1f} min) over {training_steps} steps")
 
-log('final bleu on the full eval set')
+log(f'final bleu on the full eval set (beam size {beam_size})')
 t = now()
-hyps, refs, srcs = translate_eval(len(eval_sorted_idx))
+hyps, refs, srcs = translate_eval(len(eval_sorted_idx), beam=beam_size)
 full_file.write("=== final full-eval samples ===\n")
 write_samples(full_file, hyps, refs, srcs)
 score, lo, hi = bootstrap_bleu_ci(hyps, refs)
