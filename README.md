@@ -20,7 +20,7 @@ Based on the transformer architecture in [Attention Is All You Need](https://arx
 | Char -> WordPiece tokenizer | Diagnostic run | Significant increase in BLEU compared to char tokens, run interrupted |
 | Parallel Multi-head attention, bigger dataset (Helsinki-NLP/opus-100), batch on token count | 16.45 | Training foundation established, however overfitting visible |
 | Dropout 0.1 -> 0.3, introduce weight decay | 32.88 ±1.37 | Reached first goal of passing 30 BLEU (threshold based on literature for IT -> EN) |
-| Beam search (width 5) | 33.53 ±1.37 | Evaluated on the best BLEU checkpoint of the previous run |
+| Beam search (width 4) | 33.53 ±1.37 | Evaluated on the best BLEU checkpoint of the previous run |
 
 ## Usage
 
