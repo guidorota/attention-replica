@@ -48,6 +48,11 @@ uv run eval.py <checkpoint.pt> --split validation -n 64 # quick 64-sentence samp
 
 ## Diary
 
+### 2026-06-24
+
+* Published weights and tokenizer for the last run. `training/20260622-174040/best-bleu.pt` is the checkpoint used to calculate the headline results.
+* Likely not putting more effort on this project beyond this commit, moving on to other work.
+
 ### 2026-06-23
 
 * Implemented beam search, can see a slight improvement in the final scores:
