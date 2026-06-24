@@ -11,7 +11,7 @@ Based on the transformer architecture in [Attention Is All You Need](https://arx
 
 ## Results and progression
 
-**Result: 33.53 95% CI [32.18, 34.93] (±1.37)** with beam search of width 4 on `Helsinki-NLP/opus-100` IT -> EN (Original paper obtained BLEU 27.3 on WMT 2014 EN -> DE).
+**Result: 33.53 95% CI [32.18, 34.93] (±1.37)** with beam search of width 4 on `Helsinki-NLP/opus-100` IT -> EN (Original paper obtained BLEU 27.3 on WMT 2014 EN -> DE). Weights for the result training run can be found in the `training/20260622-174040` folder.
 
 | Configuration | BLEU | Notes |
 |---|---|---|

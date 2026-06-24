@@ -1,0 +1,71 @@
+logging this run to training/20260622-174040/
+training
+step 0: train loss 9.8599, eval loss 9.8584, BLEU 0.00
+  timing: loss 5.7s | bleu 6.6s | total 12s
+  new best BLEU 0.00 -> saved best-bleu.pt
+  new best eval loss 9.8584 -> saved best-loss.pt
+step 5000: train loss 3.7339, eval loss 4.0789, BLEU 6.46
+  timing: 5000 train steps 1419.9s (284ms/step) | loss 5.5s | bleu 3.4s | total 1441s
+  new best BLEU 6.46 -> saved best-bleu.pt
+  new best eval loss 4.0789 -> saved best-loss.pt
+step 10000: train loss 3.3551, eval loss 3.7524, BLEU 12.31
+  timing: 5000 train steps 1418.4s (284ms/step) | loss 5.5s | bleu 0.7s | total 2866s
+  new best BLEU 12.31 -> saved best-bleu.pt
+  new best eval loss 3.7524 -> saved best-loss.pt
+step 15000: train loss 3.0065, eval loss 3.5226, BLEU 15.36
+  timing: 5000 train steps 1417.7s (284ms/step) | loss 5.6s | bleu 3.4s | total 4293s
+  new best BLEU 15.36 -> saved best-bleu.pt
+  new best eval loss 3.5226 -> saved best-loss.pt
+step 20000: train loss 2.6604, eval loss 3.2621, BLEU 24.08
+  timing: 5000 train steps 1414.1s (283ms/step) | loss 5.8s | bleu 0.4s | total 5714s
+  new best BLEU 24.08 -> saved best-bleu.pt
+  new best eval loss 3.2621 -> saved best-loss.pt
+step 25000: train loss 2.6133, eval loss 3.1237, BLEU 26.58
+  timing: 5000 train steps 1409.3s (282ms/step) | loss 5.6s | bleu 0.6s | total 7129s
+  new best BLEU 26.58 -> saved best-bleu.pt
+  new best eval loss 3.1237 -> saved best-loss.pt
+step 30000: train loss 2.5084, eval loss 3.0571, BLEU 28.74
+  timing: 5000 train steps 1413.4s (283ms/step) | loss 5.6s | bleu 0.4s | total 8549s
+  new best BLEU 28.74 -> saved best-bleu.pt
+  new best eval loss 3.0571 -> saved best-loss.pt
+step 35000: train loss 2.4492, eval loss 3.0125, BLEU 29.56
+  timing: 5000 train steps 1415.4s (283ms/step) | loss 5.5s | bleu 0.4s | total 9971s
+  new best BLEU 29.56 -> saved best-bleu.pt
+  new best eval loss 3.0125 -> saved best-loss.pt
+step 40000: train loss 2.3261, eval loss 2.9958, BLEU 30.49
+  timing: 5000 train steps 1409.6s (282ms/step) | loss 5.7s | bleu 0.4s | total 11387s
+  new best BLEU 30.49 -> saved best-bleu.pt
+  new best eval loss 2.9958 -> saved best-loss.pt
+step 45000: train loss 2.3092, eval loss 2.9827, BLEU 30.51
+  timing: 5000 train steps 1414.8s (283ms/step) | loss 5.5s | bleu 0.4s | total 12808s
+  new best BLEU 30.51 -> saved best-bleu.pt
+  new best eval loss 2.9827 -> saved best-loss.pt
+step 50000: train loss 2.2394, eval loss 2.9898, BLEU 31.00
+  timing: 5000 train steps 1415.3s (283ms/step) | loss 5.7s | bleu 0.5s | total 14230s
+  new best BLEU 31.00 -> saved best-bleu.pt
+step 55000: train loss 2.2088, eval loss 2.9845, BLEU 30.71
+  timing: 5000 train steps 1414.8s (283ms/step) | loss 5.7s | bleu 0.4s | total 15651s
+step 60000: train loss 2.1580, eval loss 2.9862, BLEU 30.52
+  timing: 5000 train steps 1417.0s (283ms/step) | loss 5.9s | bleu 0.5s | total 17074s
+step 65000: train loss 2.1115, eval loss 2.9907, BLEU 31.02
+  timing: 5000 train steps 1415.9s (283ms/step) | loss 5.6s | bleu 0.4s | total 18496s
+  new best BLEU 31.02 -> saved best-bleu.pt
+step 70000: train loss 2.0770, eval loss 2.9985, BLEU 30.95
+  timing: 5000 train steps 1414.2s (283ms/step) | loss 5.6s | bleu 0.4s | total 19916s
+step 75000: train loss 2.0380, eval loss 3.0021, BLEU 30.83
+  timing: 5000 train steps 1412.5s (282ms/step) | loss 5.5s | bleu 0.4s | total 21335s
+step 80000: train loss 1.9852, eval loss 3.0034, BLEU 31.43
+  timing: 5000 train steps 1415.9s (283ms/step) | loss 5.9s | bleu 0.4s | total 22757s
+  new best BLEU 31.43 -> saved best-bleu.pt
+step 85000: train loss 1.9639, eval loss 3.0142, BLEU 31.87
+  timing: 5000 train steps 1416.1s (283ms/step) | loss 5.6s | bleu 0.4s | total 24179s
+  new best BLEU 31.87 -> saved best-bleu.pt
+step 90000: train loss 1.9650, eval loss 3.0196, BLEU 30.97
+  timing: 5000 train steps 1415.1s (283ms/step) | loss 5.5s | bleu 0.4s | total 25600s
+step 95000: train loss 1.9491, eval loss 3.0162, BLEU 30.73
+  timing: 5000 train steps 1414.1s (283ms/step) | loss 5.6s | bleu 0.5s | total 27020s
+training complete: 28434s (473.9 min) over 100000 steps
+final bleu on the full eval set
+final BLEU (full eval, 1999 sentences): 32.84 95% CI [31.52, 34.32] (±1.40) in 63s
+saved loss plot to training/20260622-174040/loss.png
+saved final weights to training/20260622-174040/final.pt
